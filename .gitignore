@@ -1,0 +1,9 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Compiled Moran's I tool
+Super_resolution_analysis/Morans_I/*.o
+Super_resolution_analysis/Morans_I/morans_i_genomic
