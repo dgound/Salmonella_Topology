@@ -62,11 +62,16 @@ def flatten_coords(points):
     return [float(c) for p in points for c in p]
 
 
-def mean_dewitt_crossings(points, target_length, num_samples, rng):
+def mean_dewitt_crossings(points, target_length, num_samples, rng, replace=True):
     """Mean simplified crossing number across num_samples deWitt L-gons.
 
     chunk_size = floor(N / L). The last (N - L*chunk_size) vertices are
     ignored to keep all chunks the same size.
+
+    replace=True (default): each sample's indices are drawn independently.
+    replace=False: per chunk, draw a single random permutation of all chunk
+        indices and use the i-th value for sample i (so no chain point is
+        reused across samples). Requires num_samples <= chunk.
     """
     import knoodle
 
@@ -75,11 +80,22 @@ def mean_dewitt_crossings(points, target_length, num_samples, rng):
     if chunk < 1:
         return None, "polygon too short for target length"
 
+    if not replace:
+        if num_samples > chunk:
+            return None, f"num_samples={num_samples} > chunk_size={chunk} with replace=False"
+        perm_matrix = np.empty((num_samples, target_length), dtype=np.int64)
+        for c in range(target_length):
+            perm = rng.permutation(chunk)[:num_samples]
+            perm_matrix[:, c] = c * chunk + perm
+
     crossings = np.full(num_samples, -1, dtype=np.int32)
     for i in range(num_samples):
-        idx = np.empty(target_length, dtype=np.int64)
-        for c in range(target_length):
-            idx[c] = c * chunk + int(rng.integers(0, chunk))
+        if replace:
+            idx = np.empty(target_length, dtype=np.int64)
+            for c in range(target_length):
+                idx[c] = c * chunk + int(rng.integers(0, chunk))
+        else:
+            idx = perm_matrix[i]
         sample = points[idx]
         try:
             a = knoodle.KnotAnalyzer(flatten_coords(sample),
@@ -98,7 +114,7 @@ def analyze_polygon(args):
     """Compute (crossing_full, dict of mean_crossing_L) for one polygon."""
     import knoodle
 
-    filepath, filename, file_index, lengths, num_samples = args
+    filepath, filename, file_index, lengths, num_samples_per_length, replace = args
     result = {"filename": filename, "crossing_full": None, "error": None}
     for L in lengths:
         result[f"mean_crossing_L{L}"] = None
@@ -115,7 +131,8 @@ def analyze_polygon(args):
 
         for L in lengths:
             rng = np.random.default_rng(42 + file_index * 1000003 + L)
-            mean_val, err = mean_dewitt_crossings(points, L, num_samples, rng)
+            n_samp = num_samples_per_length[L]
+            mean_val, err = mean_dewitt_crossings(points, L, n_samp, rng, replace=replace)
             if mean_val is None:
                 result["error"] = f"L={L}: {err}"
                 continue
@@ -134,6 +151,10 @@ def main():
                         help=f"Comma-separated downsampling lengths (default: {DEFAULT_LENGTHS})")
     parser.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES,
                         help=f"deWitt subsamples per length per polygon (default: {DEFAULT_NUM_SAMPLES})")
+    parser.add_argument("--no-replacement", action="store_true",
+                        help="Sample chain points without replacement across the "
+                             "num-samples L-gons of a chain. Per-L cap = chunk size "
+                             "(N_vertices // L); applied automatically with a message.")
     args = parser.parse_args()
 
     lengths = sorted({int(s) for s in args.lengths.split(",") if s.strip()},
@@ -147,7 +168,25 @@ def main():
         sys.exit(1)
 
     n_total = len(files)
-    tasks = [(f, os.path.basename(f), i, lengths, args.num_samples)
+    replace = not args.no_replacement
+
+    # Per-L cap when --no-replacement.
+    sample_n = np.loadtxt(files[0], delimiter="\t").shape[0]
+    num_samples_per_length = {}
+    capped_msgs = []
+    for L in lengths:
+        chunk = sample_n // L
+        if args.no_replacement and args.num_samples > chunk:
+            num_samples_per_length[L] = chunk
+            capped_msgs.append(f"L={L}: {args.num_samples} -> {chunk} (chunk_size)")
+        else:
+            num_samples_per_length[L] = args.num_samples
+    if capped_msgs:
+        print("[INFO] --no-replacement: capped num_samples for some lengths:")
+        for m in capped_msgs:
+            print(f"       {m}")
+
+    tasks = [(f, os.path.basename(f), i, lengths, num_samples_per_length, replace)
              for i, f in enumerate(files)]
 
     print("=" * 60)
@@ -155,7 +194,9 @@ def main():
     print(f"  Input folder:               {args.input_folder}")
     print(f"  Polygons:                   {n_total}")
     print(f"  Lengths:                    {lengths}")
-    print(f"  deWitt samples per length:  {args.num_samples}")
+    print(f"  deWitt samples per length:  "
+          f"{ {L: num_samples_per_length[L] for L in lengths} }")
+    print(f"  Replacement:                {'no' if args.no_replacement else 'yes'}")
     print(f"  Workers:                    {NUM_WORKERS}")
     print(f"  Output CSV:                 {args.output}")
     print("=" * 60, flush=True)

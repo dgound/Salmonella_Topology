@@ -108,7 +108,10 @@ def balanced_matrix(counts):
     g_off = np.sqrt(counts[0, 1] * counts[1, 0])
     total = g_diag + g_off
     d = 100.0 * g_diag / total if total > 0 else 50.0
-    return np.array([[d, 100.0 - d], [100.0 - d, d]])
+    m = np.array([[d, 100.0 - d], [100.0 - d, d]])
+    m[np.abs(m) < 1e-9] = 0.0
+    m[np.abs(m - 100.0) < 1e-9] = 100.0
+    return m
 
 
 def draw_panel(ax, counts, kept_n, p_percent, n_each, show_xlabels, show_ylabels):

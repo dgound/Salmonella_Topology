@@ -60,26 +60,42 @@ def flatten_coords(points):
     return [float(c) for p in points for c in p]
 
 
-def sample_dewitt_20gons(points, num_samples, rng):
-    """One random point per 500-point chunk; repeated num_samples times."""
+def sample_dewitt_20gons(points, num_samples, rng, replace=True):
+    """One random point per 500-point chunk; repeated num_samples times.
+
+    replace=True (default): each sample's indices are drawn independently, so
+        the same chain point can appear in more than one sample.
+    replace=False: per chunk, draw a single random permutation of all chunk
+        indices and use the i-th value for sample i. Requires
+        num_samples <= STRIDE (chunk size).
+    """
     num_chunks = len(points) // STRIDE
-    samples = []
-    for _ in range(num_samples):
-        indices = [chunk * STRIDE + rng.integers(0, STRIDE) for chunk in range(num_chunks)]
-        samples.append(points[indices])
-    return samples
+    if replace:
+        samples = []
+        for _ in range(num_samples):
+            indices = [chunk * STRIDE + rng.integers(0, STRIDE) for chunk in range(num_chunks)]
+            samples.append(points[indices])
+        return samples
+
+    if num_samples > STRIDE:
+        raise ValueError(f"num_samples={num_samples} > STRIDE={STRIDE} with replace=False")
+    perm_matrix = np.empty((num_samples, num_chunks), dtype=np.int64)
+    for chunk in range(num_chunks):
+        perm = rng.permutation(STRIDE)[:num_samples]
+        perm_matrix[:, chunk] = chunk * STRIDE + perm
+    return [points[perm_matrix[i]] for i in range(num_samples)]
 
 
 def analyze_object(args):
     """Return (summary_dict, crossings_array) for one object.
 
     The summary dict has the per-object stats (matches the summary CSV
-    schema). The crossings_array is a length-NUM_20GON_SAMPLES int16 array
+    schema). The crossings_array is a length-num_samples int16 array
     of per-sample 20-gon crossing counts (or empty if everything failed).
     """
     import knoodle
 
-    filepath, filename, population, file_index = args
+    filepath, filename, population, file_index, num_samples, replace = args
     empty = np.empty(0, dtype=np.int16)
     try:
         points = load_polygon(filepath)
@@ -93,9 +109,9 @@ def analyze_object(args):
         crossing_10k = analyzer.crossing_count
 
         rng = np.random.default_rng(42 + file_index)
-        samples = sample_dewitt_20gons(points, NUM_20GON_SAMPLES, rng)
+        samples = sample_dewitt_20gons(points, num_samples, rng, replace=replace)
 
-        crossings = np.full(NUM_20GON_SAMPLES, -1, dtype=np.int16)
+        crossings = np.full(num_samples, -1, dtype=np.int16)
         for i, sample in enumerate(samples):
             try:
                 a = knoodle.KnotAnalyzer(flatten_coords(sample),
@@ -148,10 +164,25 @@ def main():
     parser.add_argument("--samples-output", default=None,
                         help="Parquet path for the per-sample 20-gon counts "
                              "(default: same dir as --output, suffix _samples.parquet)")
+    parser.add_argument("--num-samples", type=int, default=NUM_20GON_SAMPLES,
+                        help=f"deWitt 20-gons per object (default: {NUM_20GON_SAMPLES})")
+    parser.add_argument("--no-replacement", action="store_true",
+                        help="Sample chain points without replacement across the "
+                             "num-samples 20-gons of a chain. Requires "
+                             f"num-samples <= STRIDE={STRIDE}; capped automatically.")
     args = parser.parse_args()
 
-    tasks = build_task_list(args.knotted_dir, args.unknotted_dir,
-                            args.exclude_knotted, args.exclude_unknotted)
+    num_samples = args.num_samples
+    if args.no_replacement and num_samples > STRIDE:
+        print(f"[INFO] --no-replacement: capping num_samples {num_samples} -> {STRIDE} "
+              f"(chunk size STRIDE={STRIDE} is the maximum per-chain budget without replacement)")
+        num_samples = STRIDE
+    replace = not args.no_replacement
+
+    raw_tasks = build_task_list(args.knotted_dir, args.unknotted_dir,
+                                args.exclude_knotted, args.exclude_unknotted)
+    tasks = [(fp, fn, pop, idx, num_samples, replace)
+             for fp, fn, pop, idx in raw_tasks]
 
     print("=" * 60)
     print("Quadrant analysis: compute crossing numbers")
@@ -159,7 +190,8 @@ def main():
     print(f"Unknotted dir: {args.unknotted_dir}")
     print(f"Total objects: {len(tasks)}")
     print(f"Workers: {NUM_WORKERS} (threads per worker: {THREADS_PER_PROCESS})")
-    print(f"deWitt samples per object: {NUM_20GON_SAMPLES} (stride {STRIDE} -> 20-gons)")
+    print(f"deWitt samples per object: {num_samples} (stride {STRIDE} -> 20-gons; "
+          f"replace={'no' if args.no_replacement else 'yes'})")
     print("=" * 60)
 
     with Pool(processes=NUM_WORKERS, maxtasksperchild=20) as pool:
