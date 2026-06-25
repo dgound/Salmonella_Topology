@@ -11,16 +11,19 @@ length, runs a threshold sweep:
   - on the L-gon-score axis: same.
   - restrict to polygons that are in an extreme group on BOTH axes ("kept set").
   - rows = full-chain top/bottom, cols = L-gon top/bottom.
-  - cell = 2 * (count / kept) so both rows and columns sum to 100% in the
-    balanced case.
+  - the 2x2 count matrix is balanced to doubly-stochastic percentages
+    (geometric-mean / Sinkhorn form) so every row AND every column sums to
+    100% at any threshold. At p=50% the counts are already balanced and this
+    reduces to the plain symmetric display.
 
 Per length L we save:
   - <base>_L<L>_sweep.{png,pdf}  : grid of 2x2 panels, one per threshold
   - <base>_L<L>_sweep_summary.csv
 
 Plus one overall summary CSV (<base>_summary.csv) and a convergence line
-plot (<base>_convergence.{png,pdf}) showing the smallest p% at which the
-matrix reaches 100/0/0/100 ("perfect classification"), for each L.
+plot (<base>_convergence.{png,pdf}) showing the largest (most lenient) p% at
+which the matrix still reaches 100/0/0/100 ("perfect classification"), for
+each L -- the onset of perfect separation.
 
 Usage:
     python salmonella_gaussian_quadrant_plot.py <stats_csv>
@@ -34,6 +37,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import seaborn as sns
 
 DIAG_COLOR = "#a6d49f"
@@ -91,8 +95,24 @@ def threshold_matrix(values_y, values_x, p_percent, seed=42):
     return counts, int(np.sum(keep)), n_each
 
 
+def balanced_matrix(counts):
+    """Doubly-stochastic (%) form of the 2x2 count matrix.
+
+    Returns a symmetric matrix in which every row and every column sums to
+    100% at any threshold (geometric-mean / Sinkhorn balancing). When the
+    counts are already balanced (e.g. p=50%) it reduces to the plain
+    2 * 100 * count / kept display.
+    """
+    counts = np.asarray(counts, dtype=float)
+    g_diag = np.sqrt(counts[0, 0] * counts[1, 1])
+    g_off = np.sqrt(counts[0, 1] * counts[1, 0])
+    total = g_diag + g_off
+    d = 100.0 * g_diag / total if total > 0 else 50.0
+    return np.array([[d, 100.0 - d], [100.0 - d, d]])
+
+
 def draw_panel(ax, counts, kept_n, p_percent, n_each, show_xlabels, show_ylabels):
-    matrix = 2.0 * 100.0 * counts / kept_n if kept_n > 0 else np.zeros_like(counts, dtype=float)
+    matrix = balanced_matrix(counts) if kept_n > 0 else np.zeros((2, 2), dtype=float)
     cell_colors = np.array([[DIAG_COLOR, OFFDIAG_COLOR],
                             [OFFDIAG_COLOR, DIAG_COLOR]])
     for i in range(2):
@@ -123,7 +143,8 @@ def draw_panel(ax, counts, kept_n, p_percent, n_each, show_xlabels, show_ylabels
         spine.set_linewidth(1.2)
 
 
-def plot_length_sweep(df, length, thresholds, output_dir, base_name, title):
+def plot_length_sweep(df, length, thresholds, output_dir, base_name, title,
+                      combined_pdf=None):
     score_col = f"mean_crossing_L{length}"
     sub = df.dropna(subset=[score_col]).copy()
     y = sub["crossing_full"].to_numpy()
@@ -132,7 +153,7 @@ def plot_length_sweep(df, length, thresholds, output_dir, base_name, title):
     rows = []
     for p in thresholds:
         counts, kept, n_each = threshold_matrix(y, x, p)
-        m = 2.0 * 100.0 * counts / kept if kept > 0 else np.zeros_like(counts, dtype=float)
+        m = balanced_matrix(counts) if kept > 0 else np.zeros((2, 2), dtype=float)
         rows.append({
             "length": length,
             "threshold_percent": p,
@@ -182,14 +203,21 @@ def plot_length_sweep(df, length, thresholds, output_dir, base_name, title):
     pdf_path = os.path.join(output_dir, f"{base_name}_L{length}_sweep.pdf")
     plt.savefig(png_path, dpi=150)
     plt.savefig(pdf_path, dpi=150)
+    if combined_pdf is not None:
+        combined_pdf.savefig(fig)
     plt.close()
     print(f"  [L={length}] figure  -> {png_path}")
 
     return summary_df
 
 
-def smallest_perfect_threshold(summary_df):
-    """Smallest p% where the matrix is exactly 100/0/0/100, else NaN."""
+def onset_perfect_threshold(summary_df):
+    """Largest p% where the matrix is exactly 100/0/0/100, else NaN.
+
+    Perfect classification gets easier as the threshold tightens, so this is
+    the most lenient (largest) p% at which classification is still perfect --
+    the onset of perfect separation.
+    """
     eps = 1e-9
     perfect = summary_df[
         (summary_df["pct_bot_top"] < eps) &
@@ -199,14 +227,14 @@ def smallest_perfect_threshold(summary_df):
     ]
     if perfect.empty:
         return None
-    return float(perfect["threshold_percent"].min())
+    return float(perfect["threshold_percent"].max())
 
 
 def plot_convergence(combined, lengths, output_dir, base_name, title):
     points = []
     for L in lengths:
         sub = combined[combined["length"] == L]
-        p = smallest_perfect_threshold(sub)
+        p = onset_perfect_threshold(sub)
         points.append((L, p))
 
     sns.set_style("whitegrid")
@@ -229,7 +257,7 @@ def plot_convergence(combined, lengths, output_dir, base_name, title):
                         textcoords="offset points", fontsize=9)
 
     ax.set_xlabel("Downsampling length L", fontsize=12)
-    ax.set_ylabel("Smallest threshold p% giving 100/0 classification", fontsize=12)
+    ax.set_ylabel("Largest threshold p% giving perfect 100/0 classification (onset)", fontsize=12)
     ax.set_xscale("log")
     ax.set_xticks(L_arr)
     ax.set_xticklabels([str(L) for L in L_arr])
@@ -281,10 +309,14 @@ def main():
     print(f"[INFO] Thresholds: {thresholds}")
 
     combined = []
-    for L in lengths:
-        print(f"\n[length sweep] L = {L}")
-        summary_df = plot_length_sweep(df, L, thresholds, output_dir, base_name, args.title)
-        combined.append(summary_df)
+    all_lengths_pdf = os.path.join(output_dir, f"{base_name}_all_lengths.pdf")
+    with PdfPages(all_lengths_pdf) as combined_pdf:
+        for L in lengths:
+            print(f"\n[length sweep] L = {L}")
+            summary_df = plot_length_sweep(df, L, thresholds, output_dir, base_name,
+                                           args.title, combined_pdf=combined_pdf)
+            combined.append(summary_df)
+    print(f"\n[INFO] Combined per-length PDF saved to {all_lengths_pdf}")
     combined_df = pd.concat(combined, ignore_index=True)
     summary_path = os.path.join(output_dir, f"{base_name}_summary.csv")
     combined_df.to_csv(summary_path, index=False)
