@@ -1016,7 +1016,8 @@ def load_and_preprocess_data(filepath):
     return complete_walks
 
 
-def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False):
+def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False,
+                                no_replacement=False):
     """
     Sample trajectories from a single Walk-ID.
     For each iteration, randomly select one point from each time-point.
@@ -1031,11 +1032,38 @@ def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False):
         When True, shuffle the order of the 20 sampled vertices before
         computing the knot type (control for random rather than genomic
         connection order).
+    no_replacement : bool, default False
+        When True, each localization at a given time-point is used in at
+        most one sampled curve. Each TP's index pool is independently
+        shuffled. Effective N is capped at min over TPs of |pool_TP|.
 
     Returns: List of (curve, knot_name, determinant) tuples
              where curve is np.ndarray of shape (20, 3)
     """
     results = []
+
+    if no_replacement:
+        tp_pools = {}
+        for tp in range(0, 20):
+            tp_data = walk_data[walk_data['time-point'] == tp]
+            if len(tp_data) == 0:
+                return results  # Missing TP: cannot form any 20-vertex curve
+            tp_pools[tp] = tp_data[['x', 'y', 'z']].values
+
+        min_pool = min(len(p) for p in tp_pools.values())
+        effective_n = min(n_iterations, min_pool)
+        # Pre-shuffle each TP's indices independently and slice to effective_n
+        shuffled = {tp: np.random.permutation(len(tp_pools[tp]))[:effective_n]
+                    for tp in range(20)}
+
+        for i in range(effective_n):
+            curve = np.array([tp_pools[tp][shuffled[tp][i]] for tp in range(20)])
+            if randomize_order:
+                curve = curve[np.random.permutation(20)]
+            knot_name, determinant = calculate_knot_properties(curve)
+            results.append((curve, knot_name, determinant))
+
+        return results
 
     for _ in range(n_iterations):
         trajectory = []
@@ -1422,7 +1450,8 @@ def create_single_walk_stacked_bar(walk_id, walk_results, controls, ax, metrics=
 
         bar_x = np.arange(2)
         bar_heights = [pct_unknot, pct_knotted]
-        ax.bar(bar_x, bar_heights, width=0.6, color='C0',
+        ax.bar(bar_x, bar_heights, width=0.6,
+               color=['#a4cc92', '#edc3cd'],
                edgecolor='black', linewidth=1.0)
 
         for xi, h in zip(bar_x, bar_heights):
@@ -3395,21 +3424,27 @@ def process_walk_parallel(args):
     Parameters:
     -----------
     args : tuple
-        (walk_id, walk_data, n_iterations) or
-        (walk_id, walk_data, n_iterations, randomize_order)
+        (walk_id, walk_data, n_iterations),
+        (walk_id, walk_data, n_iterations, randomize_order), or
+        (walk_id, walk_data, n_iterations, randomize_order, no_replacement)
 
     Returns:
     --------
     tuple : (walk_id, results_list)
         walk_id and list of (curve, knot_name, determinant) tuples
     """
-    if len(args) == 4:
+    if len(args) == 5:
+        walk_id, walk_data, n_iterations, randomize_order, no_replacement = args
+    elif len(args) == 4:
         walk_id, walk_data, n_iterations, randomize_order = args
+        no_replacement = False
     else:
         walk_id, walk_data, n_iterations = args
         randomize_order = False
+        no_replacement = False
     results = sample_trajectory_from_walk(walk_data, n_iterations,
-                                          randomize_order=randomize_order)
+                                          randomize_order=randomize_order,
+                                          no_replacement=no_replacement)
 
     # Validate results before returning
     is_valid, error_msg = validate_knot_results(results, f"Walk-ID {walk_id} (parallel)")
@@ -4155,6 +4190,12 @@ def main():
                        help='Connect sampled De Witt points in random order '
                             '(permute the 20 vertices) instead of genomic order. '
                             'Use as a control: genomic structure should be destroyed.')
+    parser.add_argument('--no_replacement', action='store_true',
+                       help='Sample De Witt curves WITHOUT replacement: each '
+                            'localization at a given time-point is used in at '
+                            'most one curve. Per-TP index pools are independently '
+                            'shuffled. Effective N per walk is capped at '
+                            'min_TP |pool_TP|.')
     parser.add_argument('--no_stacked_barplots', action='store_true',
                        help='Per-walk pages: only Unknotted/Knotted bars (no controls). '
                             'Also adds a 2-category version of the first page after the original.')
@@ -4227,7 +4268,7 @@ def main():
         print(f"Using {n_workers} parallel workers...")
 
         # Prepare arguments for parallel processing
-        parallel_args = [(walk_id, walk_data, args.N, args.randomize_order)
+        parallel_args = [(walk_id, walk_data, args.N, args.randomize_order, args.no_replacement)
                         for walk_id, walk_data in walk_groups.items()]
 
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
@@ -4242,7 +4283,8 @@ def main():
         # Sequential processing
         for walk_id, walk_data in tqdm(walk_groups.items(), desc="Processing Walk-IDs"):
             walk_results[walk_id] = sample_trajectory_from_walk(
-                walk_data, args.N, randomize_order=args.randomize_order)
+                walk_data, args.N, randomize_order=args.randomize_order,
+                no_replacement=args.no_replacement)
 
     # Validate all walk_results after collection
     print("\nValidating walk results...")

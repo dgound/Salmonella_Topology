@@ -24,7 +24,13 @@ microscopy modality and therefore in how many points each timepoint contributes:
 | `Super_resolution_analysis/` | SMLM (single-molecule localization) | many localizations (a cloud) | a **distribution** of sampled curves per walk |
 | `Widefield_analysis/` | Widefield | one drift-corrected point | a **single ordered curve** per walk |
 
-and **two control paths** that supply null models:
+a **shared analysis path** that applies to both modalities:
+
+| Path | Role |
+|------|------|
+| `Random_displacement_analysis/` | Vertex perturbation (jiggle) sweep and sigmoid fitting, testing knot stability under noise for both SMLM and widefield data |
+
+**two control paths** that supply null models:
 
 | Path | Role |
 |------|------|
@@ -40,9 +46,6 @@ per-path `utility/` converters.
 Salmonella_Topology/
 ├── Super_resolution_analysis/          # MAIN PATH 1 (SMLM)
 │   ├── comprehensive_report_cards.py   #   main pipeline: knot distributions + metrics + report cards
-│   ├── jiggle_control/
-│   │   ├── jiggle_control.py           #   perturb vertices over a distance sweep, track knot stability
-│   │   └── plot_jiggle_three_panel.py  #   three-panel plot of the jiggle sweep
 │   ├── Morans_I/                       #   C++ genomic Moran's I tool (spatial-genomic autocorrelation)
 │   │   ├── main_genomic.cpp
 │   │   ├── morans_i_genomic.{cpp,h}
@@ -51,10 +54,14 @@ Salmonella_Topology/
 │       └── convert_widefield_to_smlm.py# convert widefield centroid CSV into SMLM schema
 │
 ├── Widefield_analysis/                 # MAIN PATH 2 (widefield, single curve per walk)
-│   └── comprehensive_walk_report/
-│       ├── report_cards_single_curve.py# main pipeline (CLI)
-│       ├── qc_post_filter.py           #   imported module: distance matrices + parabola fits
-│       └── morans_i.py                 #   imported module: genomic Moran's I (Python port of the C++)
+│   ├── report_cards_single_curve.py    #   main pipeline (CLI)
+│   ├── qc_post_filter.py              #   imported module: distance matrices + parabola fits
+│   └── morans_i.py                    #   imported module: genomic Moran's I (Python port of the C++)
+│
+├── Random_displacement_analysis/       # SHARED: vertex perturbation (jiggle) sweep
+│   ├── jiggle_control.py              #   perturb vertices over a distance sweep, track knot stability
+│   ├── plot_jiggle_three_panel.py     #   three-panel plot of the jiggle sweep
+│   └── fit_sigmoid_jiggle.py          #   4-parameter logistic fit to jiggle H5 outputs
 │
 ├── MD_simulation_analysis/             # CONTROL: MD chromosome models
 │   ├── utility_scripts/
@@ -131,14 +138,15 @@ python comprehensive_report_cards.py 100 1000 \
   --parallel --acn --rog --kendall --metrics all
 ```
 
-### `jiggle_control/` (robustness control)
+### Random displacement analysis (`Random_displacement_analysis/`)
 
 `jiggle_control.py` tests whether the observed topology survives positional
 perturbation. It builds per-walk weighted-centroid curves, then sweeps a jiggle
 distance from 1 nm to 100 um, adding Gaussian noise (sigma = distance) to every
 vertex and reclassifying the knot at each step. It compares the jiggled
 distribution against Raw, Permuted, and Random-Curve controls and writes an HDF5
-file (`rez_df_<engine>_<C>cat.h5`).
+file (`rez_df_<engine>_<C>cat.h5`). This analysis applies to both SMLM and
+widefield data.
 
 - `--engine {knoodle,knotoid}`: `knoodle` classifies via the Alexander
   determinant at t = -1 (det 1 -> unknot, det 3 -> trefoil, else complex);
@@ -150,9 +158,15 @@ file (`rez_df_<engine>_<C>cat.h5`).
 distribution (left), the jiggle sweep on a log-distance axis (center), and the
 Random-Curve control (right). It auto-detects the 2- vs 3-category scheme.
 
+`fit_sigmoid_jiggle.py` fits a 4-parameter logistic (sigmoid) to the jiggle H5
+outputs and overlays multiple datasets (e.g. SMLM and widefield) on a single
+plot.
+
 ```bash
+cd Random_displacement_analysis
 python jiggle_control.py data.txt --engine knoodle --categories 2 --workers 8
 python plot_jiggle_three_panel.py --input rez_df_knoodle_2cat.h5 --output three_panel.pdf
+python fit_sigmoid_jiggle.py --inputs smlm.h5 wf.h5 --labels SMLM Widefield --output sigmoid.pdf
 ```
 
 ### `Morans_I/` (genomic spatial autocorrelation, C++)
@@ -170,7 +184,7 @@ make                                  # builds ./morans_i_genomic
 ```
 
 The resulting CSV can be fed back into `comprehensive_report_cards.py` via
-`--morans_i_file`. The Python port (`Widefield_analysis/.../morans_i.py`)
+`--morans_i_file`. The Python port (`Widefield_analysis/morans_i.py`)
 implements the same algorithm for the widefield path.
 
 ### `utility/convert_widefield_to_smlm.py`
@@ -391,17 +405,18 @@ cd .. && python comprehensive_report_cards.py 100 1000 \
   --input data.csv --output exp1 --parallel \
   --acn --rog --kendall --morans_i_file Morans_I/data_morans_i_results.csv
 
-# robustness sweep
-cd jiggle_control
+# robustness sweep (shared across modalities)
+cd Random_displacement_analysis
 python jiggle_control.py data.txt --engine knoodle --categories 2 --workers 8
 python plot_jiggle_three_panel.py --input rez_df_knoodle_2cat.h5 --output sweep.pdf
+python fit_sigmoid_jiggle.py --inputs smlm.h5 wf.h5 --labels SMLM Widefield --output sigmoid.pdf
 ```
 
 **Widefield path**
 
 ```bash
 # input must already be drift-corrected/filtered (drift_correct.py, upstream)
-cd Widefield_analysis/comprehensive_walk_report
+cd Widefield_analysis
 python report_cards_single_curve.py \
   --input filtered_walks.csv --outdir out --output_prefix wf1 \
   --tp_start_1based 3 --tp_end_1based 22 --acn --rog --parallel

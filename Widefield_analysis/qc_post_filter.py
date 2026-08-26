@@ -74,7 +74,7 @@ def _tp_index(tp_name):
 # ---------------------------------------------------------------------------
 FIT_MIN_WALKS_PER_OFFSET        = 3     # absolute floor on walks per offset
 FIT_MIN_FRAC_WALKS_PER_OFFSET   = 0.5   # also require at least this fraction of n_walks_used
-FIT_MIN_PAIRS_PER_WALK          = 2     # drop offsets where each walk has < this many diagonal entries (i.e. N - d)
+FIT_MIN_PAIRS_PER_WALK          = 1     # drop offsets where each walk has < this many diagonal entries (i.e. N - d)
 FIT_DROP_TERMINAL_OFFSETS       = 0     # optionally drop the top-k offsets before fitting
 
 
@@ -507,6 +507,7 @@ def build_mean_distance_matrices_figure(walks_ok,
                                 vmin=vmin, vmax=vmax)
             ax.set_xlabel('TP position in range')
             ax.set_ylabel('TP position in range')
+            ax.locator_params(axis='both', integer=True)
             ax.set_title(f'{title} (nm, mean across {n_walks} walks)')
         cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(),
                             shrink=0.85, pad=0.02)
@@ -527,6 +528,7 @@ def build_mean_distance_matrices_figure(walks_ok,
                            vmin=vmin_p, vmax=vmax_p)
             ax.set_xlabel('TP position in range')
             ax.set_ylabel('TP position in range')
+            ax.locator_params(axis='both', integer=True)
             ax.set_title(f'{title} (nm, mean across {n_walks} walks)')
             cbar = plt.colorbar(im, ax=ax)
             cbar.set_label('mean distance (nm)')

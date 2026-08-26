@@ -803,6 +803,58 @@ def generate_globule_polygons(samples_per_file, globule_dir, n_segments,
 
 
 # ===========================================================================
+# Globule-control cache: the unknotted/knotted globule knot-type
+# distributions depend only on (globule dir, n_vertices, samples_per_globule,
+# segment method) -- NOT on the walk set -- so they can be computed once and
+# reused across datasets/ranges that share those settings.
+# ===========================================================================
+def load_globule_cache_csv(path):
+    """Return (dists, meta) from a globule cache CSV, or (None, None).
+
+    dists: {globule_type: [(knot_name, determinant), ...]}
+    meta:  {n_vertices, samples_per_globule, segment_by, unknotted_dir,
+            knotted_dir} taken from the file (constant across rows).
+    """
+    if not path or not os.path.exists(path):
+        return None, None
+    dists = defaultdict(list)
+    meta = {}
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            raw = (row.get('determinant') or '').strip()
+            try:
+                det = float(raw)
+            except ValueError:
+                det = float('nan')
+            dists[row['globule_type']].append((row['knot_name'], det))
+            if not meta:
+                meta = {
+                    'n_vertices': int(row['n_vertices']),
+                    'samples_per_globule': int(row['samples_per_globule']),
+                    'segment_by': row['segment_by'],
+                    'unknotted_dir': row.get('unknotted_dir', ''),
+                    'knotted_dir': row.get('knotted_dir', ''),
+                }
+    return dict(dists), meta
+
+
+def write_globule_cache_csv(path, dists, n_vertices, samples_per_globule,
+                            segment_by, unknotted_dir, knotted_dir):
+    """Write globule (knot_name, determinant) lists + settings to a cache CSV."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['globule_type', 'knot_name', 'determinant', 'n_vertices',
+                    'samples_per_globule', 'segment_by', 'unknotted_dir',
+                    'knotted_dir'])
+        for gtype, lst in dists.items():
+            for name, det in lst:
+                w.writerow([gtype, name, det, n_vertices, samples_per_globule,
+                            segment_by, unknotted_dir, knotted_dir])
+
+
+# ===========================================================================
 # NEW: single-curve data loader.
 # One ordered (n_vertices, 3) curve per WalkID, built from the final filtered
 # CSV over the user-supplied inclusive 1-based TP range.
@@ -1820,30 +1872,162 @@ def _canonical_orient_pc(pc1, pc2, pc3):
     return pc1, pc2, pc3
 
 
-def _walk_to_constrained_pc(curve):
-    """Project one walk's (N, 3) curve into constrained (PC1, PC2, PC3).
+def _canonical_actualpc(pc1, pc2, pc3):
+    """Deterministic sign convention for the unconstrained-PCA frame.
 
-    The major axis (PC1) is the largest-eigenvalue eigenvector of the
-    walk's own 3D covariance matrix. PC2/PC3 come from the constrained
-    construction above (NOT raw PCA eigenvectors 2/3). The returned
-    array is centered at the walk's centroid.
+    Flip PC1 and PC2 so each has its largest-magnitude component positive,
+    then set PC3 = PC1 x PC2 for a right-handed frame. Signs of PCA
+    eigenvectors are otherwise arbitrary; this makes runs reproducible.
     """
-    center = curve.mean(axis=0)
-    centered = curve - center
-    cov = np.cov(centered, rowvar=False)
-    # eigh returns eigenvalues in ascending order; biggest is last column
-    _, eigvecs = np.linalg.eigh(cov)
-    pc1 = eigvecs[:, -1]
-    pc1, pc2, pc3 = _constrained_axes_from_pc1(pc1)
-    pc1, pc2, pc3 = _canonical_orient_pc(pc1, pc2, pc3)
-    R = np.column_stack([pc1, pc2, pc3])  # columns are the basis vectors
+    if pc1[int(np.argmax(np.abs(pc1)))] < 0:
+        pc1 = -pc1
+    if pc2[int(np.argmax(np.abs(pc2)))] < 0:
+        pc2 = -pc2
+    pc3 = np.cross(pc1, pc2)
+    return pc1, pc2, pc3
+
+
+def _walk_to_constrained_pc(curve, major_axis='walk3d'):
+    """Project one walk's (N, 3) curve into a per-walk PC frame (PC1, PC2, PC3).
+
+    `major_axis` selects the frame:
+      - 'walk3d' (default): PC1 = largest-eigenvalue eigenvector of the walk's
+        3D covariance (may tilt out of plane); PC2 constrained into the XY
+        plane, PC3 = PC1 x PC2 (tilts with PC1, not aligned with Z).
+      - 'walkxy': PC1 = walk's in-plane long axis (largest eigenvector of the
+        2D XY covariance, z=0). PC2 stays in XY, PC3 = Z (up to sign),
+        isolating the depth axis.
+      - 'actualpc': unconstrained 3D PCA -- PC1/PC2/PC3 are the three
+        eigenvectors of the 3D covariance (descending eigenvalue), with a
+        deterministic sign convention. Nothing is forced.
+    The returned array is centered at the walk's centroid.
+    """
+    centered = curve - curve.mean(axis=0)
+    R = np.column_stack(_walk_pc_basis(curve, major_axis))  # basis columns
     return centered @ R
 
 
-def walks_to_constrained_pc(walks):
+def _walk_pc_basis(curve, major_axis):
+    """Return (pc1, pc2, pc3) unit basis vectors for one walk's PC frame.
+
+    Same frame definitions as `_walk_to_constrained_pc`; returns the axes
+    themselves (not the projected curve) so callers can average them.
+    """
+    centered = curve - curve.mean(axis=0)
+    # eigh returns eigenvalues in ascending order; biggest is last column
+    _, eigvecs = np.linalg.eigh(np.cov(centered, rowvar=False))
+    if major_axis == 'walkxy':
+        # Long axis from the XY plane only, embedded as an in-plane 3D vector.
+        _, eig_xy = np.linalg.eigh(np.cov(centered[:, :2], rowvar=False))
+        pc1 = np.array([eig_xy[0, -1], eig_xy[1, -1], 0.0])
+        return _canonical_orient_pc(*_constrained_axes_from_pc1(pc1))
+    if major_axis == 'walk3d':
+        return _canonical_orient_pc(*_constrained_axes_from_pc1(eigvecs[:, -1]))
+    if major_axis == 'actualpc':
+        return _canonical_actualpc(
+            eigvecs[:, -1], eigvecs[:, -2], eigvecs[:, -3])
+    raise ValueError(f'Unknown major_axis={major_axis!r}')
+
+
+def walks_to_constrained_pc(walks, major_axis='walk3d'):
     """Map a walks dict {wid -> (N, 3)} into constrained PC coordinates."""
-    return {wid: _walk_to_constrained_pc(curve)
+    return {wid: _walk_to_constrained_pc(curve, major_axis=major_axis)
             for wid, curve in walks.items()}
+
+
+# ===========================================================================
+# PC-frame schematic cartoon (fixed illustration of where PC1/PC2/PC3 lie
+# relative to XYZ, one per frame mode). Not data-derived.
+# ===========================================================================
+_PC_CARTOON_COL = {'PC1': '#d62728', 'PC2': '#2ca02c', 'PC3': '#1f77b4'}
+_PC_CARTOON_TITLE = {
+    'walk3d': 'walk3d  (PC1 = 3D major axis)',
+    'walkxy': 'walkxy  (PC1 in XY, PC3 = Z)',
+    'actualpc': 'actualpc  (3D PCA, unconstrained)',
+}
+_PC_CARTOON_DESC = {
+    'walk3d': [('PC1', 'PC1: 3D long axis — tilts out of plane'),
+               ('PC2', 'PC2: lies in the XY plane'),
+               ('PC3', 'PC3: perpendicular to both (tilted)')],
+    'walkxy': [('PC1', 'PC1: long axis, in the XY plane'),
+               ('PC2', 'PC2: in the XY plane (perp. PC1)'),
+               ('PC3', 'PC3: aligned with Z (depth)')],
+    'actualpc': [('PC1', 'PC1: 1st eigenvector (major axis)'),
+                 ('PC2', 'PC2: 2nd eigenvector (free)'),
+                 ('PC3', 'PC3: 3rd eigenvector (free)')],
+}
+def _pc_median_axes(walks, major_axis):
+    """Per-frame median-orientation arrow + per-cell axes for the cartoon.
+
+    For each PC axis: the bold arrow is built from the MEDIAN tilt above the
+    XY plane (robust to the Z-tilted tail, unlike a vector average which
+    collapses onto the coherent minority) combined with the dominant in-plane
+    azimuth. Returns (arrows, vecs, med_elev) where vecs holds the per-cell
+    unit axes for the faint spread cloud and med_elev the median tilt (deg).
+    """
+    labs = ('PC1', 'PC2', 'PC3')
+    vecs = {l: [] for l in labs}
+    for curve in walks.values():
+        b = _walk_pc_basis(curve, major_axis)
+        for k, l in enumerate(labs):
+            vecs[l].append(b[k])
+    arrows, med_elev = {}, {}
+    for l in labs:
+        V = np.array(vecs[l])
+        elev = np.degrees(np.arcsin(np.clip(np.abs(V[:, 2]), 0, 1)))
+        eM = float(np.median(elev)); med_elev[l] = eM
+        T2 = V[:, :2].T @ V[:, :2]                 # dominant in-plane azimuth
+        _, v2 = np.linalg.eigh(T2)
+        az = v2[:, -1]
+        az = az / (np.linalg.norm(az) + 1e-12)
+        er = np.radians(eM)
+        arrows[l] = np.array([az[0]*np.cos(er), az[1]*np.cos(er), np.sin(er)])
+    return arrows, vecs, med_elev
+
+
+def build_pc_frame_cartoon_figure(mode, walks):
+    """3D cartoon of the PC axes vs XYZ for `mode` (data-derived).
+
+    Bold arrow per PC = MEDIAN orientation (median tilt above the XY plane +
+    dominant in-plane azimuth); faint lines = the per-cell axis spread. The
+    median tilt is used instead of a vector average, which for a broad in-plane
+    distribution collapses onto a coherent Z-tilted minority and points where
+    few walks lie. Each PC's median tilt (deg above plane) is annotated.
+    """
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    arrows, vecs, med_elev = _pc_median_axes(walks, mode)
+    n = len(walks)
+    fig = plt.figure(figsize=(8.5, 8.5))
+    ax = fig.add_subplot(111, projection='3d')
+    sq = [[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]]
+    ax.add_collection3d(Poly3DCollection([sq], facecolor='0.5', alpha=0.10,
+                                         edgecolor='0.7', linewidths=0.5))
+    L = 1.05
+    for v, lab in [([L, 0, 0], 'X'), ([0, L, 0], 'Y'), ([0, 0, L], 'Z')]:
+        ax.quiver(0, 0, 0, *v, color='0.6', lw=1.2, arrow_length_ratio=0.08)
+        ax.text(*[x*1.15 for x in v], lab, color='0.4', fontsize=10)
+    for lab in ('PC1', 'PC2', 'PC3'):
+        col = _PC_CARTOON_COL[lab]
+        a = arrows[lab]
+        V = np.array(vecs[lab])
+        step = max(1, len(V) // 350)
+        for u in V[::step]:                        # faint per-cell spread
+            s = u if np.dot(u, a) >= 0 else -u
+            ax.plot([0, s[0]], [0, s[1]], [0, s[2]], color=col, lw=0.3, alpha=0.08)
+        ax.quiver(0, 0, 0, *a, color=col, lw=2.8, arrow_length_ratio=0.12)
+        ax.text(*[x*1.12 for x in a], lab, color=col, fontsize=10,
+                fontweight='bold')
+    ax.set_xlim(-1.2, 1.2); ax.set_ylim(-1.2, 1.2); ax.set_zlim(-1.2, 1.2)
+    ax.set_box_aspect((1, 1, 1)); ax.view_init(elev=20, azim=35)
+    ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
+    ax.set_title(f'PC frame: {_PC_CARTOON_TITLE[mode]}\n'
+                 f'bold = median orientation, faint = per-cell spread ({n} cells)',
+                 fontsize=12, fontweight='bold')
+    for j, (lab, txt) in enumerate(_PC_CARTOON_DESC[mode]):
+        fig.text(0.5, 0.11 - 0.032*j,
+                 f'{txt}   [median {med_elev[lab]:.0f}° from plane]',
+                 ha='center', va='top', fontsize=9.5, color=_PC_CARTOON_COL[lab])
+    return fig
 
 
 # ===========================================================================
@@ -1945,6 +2129,16 @@ def _parse_args():
     p.add_argument(
         '--show_random', action='store_true',
         help='Include random-polygon control when a globule is enabled.')
+    p.add_argument(
+        '--globule_cache_csv', type=str, default=None,
+        help='Path to a globule-control cache CSV. The unknotted/knotted '
+             'globule knot-type distributions depend only on the globule '
+             'dirs, n_vertices, samples_per_globule and segmentation (NOT on '
+             'the walk set), so they can be computed once and reused across '
+             'datasets/ranges with the same settings. If the file exists it '
+             'is loaded (validated against the current settings); otherwise '
+             'the globules are computed and written to it. The random control '
+             'is always recomputed per dataset (its hull is walk-specific).')
     # ---- Moran's I (now computed internally by default) ----
     p.add_argument(
         '--morans_permutations', type=_positive_int, default=999,
@@ -2037,6 +2231,17 @@ def _parse_args():
              'figure. Pass "auto" to disable caps. Default: '
              '500,300,300,210.')
     p.add_argument(
+        '--pc_frames', nargs='+',
+        choices=['walk3d', 'walkxy', 'actualpc'],
+        default=['walk3d', 'walkxy', 'actualpc'],
+        help='Which per-cell PC frames to render for the parabola and PC '
+             'distance-matrix pages (the XYZ parabola + distance matrices are '
+             'always kept). Default: all three. Each shown frame gets its own '
+             'schematic cartoon page. walk3d: 3D major axis (PC3 tilts). '
+             'walkxy: in-plane major axis, PC3 = Z. actualpc: unconstrained '
+             '3D PCA. Give a subset to plot only those, e.g. '
+             '--pc_frames walkxy actualpc.')
+    p.add_argument(
         '--compact', action='store_true',
         help='Compact mode: write a 5-page summary PDF (population summary, '
              'XYZ parabola, constrained PC-space parabola, XYZ distance '
@@ -2045,6 +2250,28 @@ def _parse_args():
              'xzCN, RoG, RMS_writhe. No per-walk report cards are produced. '
              'Auto-enables --acn, --rog, --xyCN, --xzCN, --yzCN when not '
              'already set so the compact CSV has all metric columns.')
+    p.add_argument(
+        '--sections', nargs='+',
+        choices=['summary', 'parabolas', 'distance_matrices', 'all'],
+        default=['all'],
+        help='Which compact-report sections to produce. Default all. '
+             'Selecting only parabolas and/or distance_matrices (without '
+             'summary) runs a fast path that SKIPS the globule/random '
+             'controls, Moran\'s I, and per-walk metrics (none are needed for '
+             'those pages) and writes <prefix>_<sections>.pdf. Requesting '
+             'summary (or all) runs the full pipeline. Ignored in '
+             'comprehensive (non-compact) mode.')
+    p.add_argument(
+        '--start_locus', type=_positive_int, default=1,
+        help='1-based position within the TP range at which to START the '
+             'ordered curve, circularly rolling the loci. Default 1 (no '
+             'change). Use to re-anchor the parabola + distance matrices at a '
+             'chosen locus, e.g. Ter: --start_locus 17 reorders a 20-locus '
+             'range to 17,18,...,20,1,...,16. Applied to both the analysis '
+             'and parabola ranges (must be valid for both). The parabola '
+             'offset is linear, so this genuinely re-anchors it (not just a '
+             'relabel); PC frames are unaffected (order-invariant) but their '
+             'projected coordinates roll with the loci.')
     args = p.parse_args()
     if args.tp_end_1based < args.tp_start_1based:
         p.error('--tp_end_1based must be >= --tp_start_1based')
@@ -2073,6 +2300,9 @@ def _parse_args():
     args.pc_distance_caps_nm = _parse_caps(
         args.pc_distance_caps_nm, '--pc_distance_caps_nm')
 
+    if 'all' in args.sections:
+        args.sections = ['summary', 'parabolas', 'distance_matrices']
+
     if args.compact:
         # Auto-enable metric flags that feed the compact CSV columns.
         args.acn = True
@@ -2081,6 +2311,79 @@ def _parse_args():
         args.xzCN = True
         args.yzCN = True
     return args
+
+
+def _render_sections_subset(args, walks, parabola_walks, parabola_n_vertices,
+                            sections):
+    """Fast path for parabolas-only / distance-matrices-only compact runs.
+
+    Renders just the requested geometry pages (XYZ + per-frame, each PC frame
+    led by its cartoon) and, if parabolas are requested, the 3D parabola
+    side-cars. Skips the population summary, so no globule/random controls,
+    no Moran's I, and no per-walk metrics are computed. Writes
+    <prefix>_<sections>.pdf. `sections` is a subset of
+    {'parabolas', 'distance_matrices'}.
+    """
+    want_parab = 'parabolas' in sections
+    want_mat = 'distance_matrices' in sections
+    tag = '_'.join(s for s in ('parabolas', 'distance_matrices')
+                   if s in sections)
+    pdf_path = os.path.join(args.outdir, f'{args.output_prefix}_{tag}.pdf')
+    pc_walks = {f: walks_to_constrained_pc(walks, major_axis=f)
+                for f in args.pc_frames}
+    pc_parab = {f: walks_to_constrained_pc(parabola_walks, major_axis=f)
+                for f in args.pc_frames}
+    print(f'\nSections mode ({tag}): skipping controls / Moran\'s / metrics.')
+    print(f'Writing PDF: {pdf_path}')
+
+    def _parab(w, names, label):
+        fig, _, _ = build_mean_parabola_xyz_figure(
+            w, args.parabola_tp_start_1based, args.parabola_tp_end_1based,
+            n_tp_in_range=parabola_n_vertices, axis_names=names,
+            space_label=label)
+        return fig
+
+    def _mat(w, names, label, caps):
+        fig, _ = build_mean_distance_matrices_figure(
+            w, args.tp_start_1based, args.tp_end_1based, axis_names=names,
+            space_label=label, global_colorbar=args.global_colorbar,
+            axis_caps_nm=caps)
+        return fig
+
+    with PdfPages(pdf_path) as pdf:
+        if want_parab and build_mean_parabola_xyz_figure is not None:
+            fig = _parab(parabola_walks, ('X', 'Y', 'Z'), 'XYZ')
+            pdf.savefig(fig); plt.close(fig)
+        if want_mat and build_mean_distance_matrices_figure is not None:
+            fig = _mat(walks, ('X', 'Y', 'Z'), 'XYZ', args.xyz_distance_caps_nm)
+            pdf.savefig(fig); plt.close(fig)
+        for frame in args.pc_frames:
+            cfig = build_pc_frame_cartoon_figure(frame, walks)
+            pdf.savefig(cfig); plt.close(cfig)
+            label = f'PC space ({frame})'
+            if want_parab and build_mean_parabola_xyz_figure is not None:
+                fig = _parab(pc_parab[frame], ('PC1', 'PC2', 'PC3'), label)
+                pdf.savefig(fig); plt.close(fig)
+            if want_mat and build_mean_distance_matrices_figure is not None:
+                fig = _mat(pc_walks[frame], ('PC1', 'PC2', 'PC3'), label,
+                           args.pc_distance_caps_nm)
+                pdf.savefig(fig); plt.close(fig)
+    print(f'Done. Sections PDF: {pdf_path}')
+
+    if want_parab and build_mean_parabola_3d_only_figure is not None:
+        sidecars = [('XYZ', 'xyz', parabola_walks)]
+        for frame in args.pc_frames:
+            sidecars.append((f'PC space ({frame})', f'pc_{frame}',
+                             pc_parab[frame]))
+        for space_label, sctag, slice_walks in sidecars:
+            side_path = os.path.join(
+                args.outdir, f'{args.output_prefix}_parabola_3d_{sctag}.pdf')
+            fig_side, _, _ = build_mean_parabola_3d_only_figure(
+                slice_walks, args.parabola_tp_start_1based,
+                args.parabola_tp_end_1based, n_tp_in_range=parabola_n_vertices,
+                space_label=space_label)
+            fig_side.savefig(side_path); plt.close(fig_side)
+            print(f'Wrote {side_path}')
 
 
 # ===========================================================================
@@ -2151,6 +2454,29 @@ def main():
         print(f'  --skip_incomplete (parabola range): dropped '
               f'{loaded_parabola["skipped_empty_coord_rows"]} rows with '
               f'empty/non-finite coordinates.')
+
+    # Optional: re-anchor the ordered curve at a chosen locus (e.g. Ter) by
+    # circularly rolling the loci. Affects the parabola (linear offset) and the
+    # distance-matrix layout for XYZ and all PC frames.
+    if args.start_locus != 1:
+        n_min = min(n_vertices, parabola_n_vertices)
+        if not (1 <= args.start_locus <= n_min):
+            raise SystemExit(
+                f'--start_locus must be in [1, {n_min}]; got {args.start_locus}')
+        shift = args.start_locus - 1
+        walks = {w: np.roll(c, -shift, axis=0) for w, c in walks.items()}
+        parabola_walks = {w: np.roll(c, -shift, axis=0)
+                          for w, c in parabola_walks.items()}
+        print(f'Re-anchored curves at locus {args.start_locus} (rolled by '
+              f'{shift}); order is now {args.start_locus}..N, 1..{shift}.')
+
+    # Fast path: parabolas/distance-matrices only (no summary) -> skip the
+    # globule/random controls, Moran's I, and per-walk metrics entirely.
+    sections = set(args.sections)
+    if args.compact and 'summary' not in sections:
+        _render_sections_subset(args, walks, parabola_walks,
+                                parabola_n_vertices, sections)
+        return 0
 
     # ---- Moran's I: internal by default, optional cache override ----
     cache_path = args.morans_cache_csv or args.morans_i_file
@@ -2255,19 +2581,50 @@ def main():
         control_dists['Random'] = rand_results
         control_curves_for_metrics = rand_curves
 
+    # Globule controls: reuse a shared cache when available (they don't depend
+    # on the walk set). Random control above stays per-dataset.
+    globule_cache, cache_meta = load_globule_cache_csv(args.globule_cache_csv)
+    if globule_cache is not None:
+        want = (n_vertices, int(args.samples_per_globule), args.segment_by,
+                os.path.basename(os.path.normpath(args.unknotted_globule or '')),
+                os.path.basename(os.path.normpath(args.knotted_globule or '')))
+        got = (cache_meta['n_vertices'], cache_meta['samples_per_globule'],
+               cache_meta['segment_by'],
+               os.path.basename(os.path.normpath(cache_meta['unknotted_dir'])),
+               os.path.basename(os.path.normpath(cache_meta['knotted_dir'])))
+        if want != got:
+            raise ValueError(
+                f'globule cache {args.globule_cache_csv} settings {got} do not '
+                f'match current {want}; use a matching cache or a fresh path.')
+        print(f'\nLoaded globule controls from cache: {args.globule_cache_csv}')
+
+    computed = {}
     if args.unknotted_globule:
-        print(f'\nUnknotted globule controls ({n_vertices}-gons)...')
-        control_dists['Unknotted Globule'] = generate_globule_polygons(
-            args.samples_per_globule, args.unknotted_globule,
-            n_vertices, args.segment_by)
-        # Metric panels stay anchored to the random-polygon controls; using
-        # globule curves for metric histograms would require loading + sampling
-        # the curves explicitly, which we defer to keep this first pass small.
+        if globule_cache and 'Unknotted Globule' in globule_cache:
+            control_dists['Unknotted Globule'] = globule_cache['Unknotted Globule']
+        else:
+            print(f'\nUnknotted globule controls ({n_vertices}-gons)...')
+            control_dists['Unknotted Globule'] = generate_globule_polygons(
+                args.samples_per_globule, args.unknotted_globule,
+                n_vertices, args.segment_by)
+            computed['Unknotted Globule'] = control_dists['Unknotted Globule']
     if args.knotted_globule:
-        print(f'\nKnotted globule controls ({n_vertices}-gons)...')
-        control_dists['Knotted Globule'] = generate_globule_polygons(
-            args.samples_per_globule, args.knotted_globule,
-            n_vertices, args.segment_by)
+        if globule_cache and 'Knotted Globule' in globule_cache:
+            control_dists['Knotted Globule'] = globule_cache['Knotted Globule']
+        else:
+            print(f'\nKnotted globule controls ({n_vertices}-gons)...')
+            control_dists['Knotted Globule'] = generate_globule_polygons(
+                args.samples_per_globule, args.knotted_globule,
+                n_vertices, args.segment_by)
+            computed['Knotted Globule'] = control_dists['Knotted Globule']
+
+    # Persist a freshly-computed cache so later runs can reuse it.
+    if args.globule_cache_csv and globule_cache is None and computed:
+        write_globule_cache_csv(
+            args.globule_cache_csv, computed, n_vertices,
+            int(args.samples_per_globule), args.segment_by,
+            args.unknotted_globule or '', args.knotted_globule or '')
+        print(f'Wrote globule cache: {args.globule_cache_csv}')
 
     # ---- Control metric values for the ACN/planar-CN/RMS/Rg panels ----
     print('\nComputing metrics on control curves...')
@@ -2293,8 +2650,10 @@ def main():
     # transform the curves live in (PC1, PC2, PC3) coordinates centered
     # on the walk's own centroid. PC2 is NOT PCA-eigenvector-2 -- it's the
     # XY rotation of PC1's projection (see `_constrained_axes_from_pc1`).
-    parabola_walks_pc = walks_to_constrained_pc(parabola_walks)
-    walks_pc = walks_to_constrained_pc(walks)
+    pc_walks = {f: walks_to_constrained_pc(walks, major_axis=f)
+                for f in args.pc_frames}
+    pc_parabola_walks = {f: walks_to_constrained_pc(parabola_walks, major_axis=f)
+                         for f in args.pc_frames}
 
     with PdfPages(pdf_path) as pdf:
         # ----- Page 1: population summary (shared with full mode) -----
@@ -2322,22 +2681,7 @@ def main():
             pdf.savefig(placeholder)
             plt.close(placeholder)
 
-        # ----- Page 3: constrained PC-space parabola QC -----
-        # In compact mode this is page 3. In full mode we also want it to
-        # show up before the distance-matrix page so both spaces are
-        # paired: XYZ parabola, PC parabola, XYZ matrices, PC matrices.
-        if build_mean_parabola_xyz_figure is not None:
-            fig, _, _ = build_mean_parabola_xyz_figure(
-                parabola_walks_pc,
-                args.parabola_tp_start_1based,
-                args.parabola_tp_end_1based,
-                n_tp_in_range=parabola_n_vertices,
-                axis_names=('PC1', 'PC2', 'PC3'),
-                space_label='PC space')
-            pdf.savefig(fig)
-            plt.close(fig)
-
-        # ----- Page 4: XYZ distance matrices (mean nm, not normalized) -----
+        # ----- XYZ distance matrices (mean nm, not normalized) -----
         if build_mean_distance_matrices_figure is not None:
             fig, _ = build_mean_distance_matrices_figure(
                 walks, args.tp_start_1based, args.tp_end_1based,
@@ -2355,16 +2699,31 @@ def main():
             pdf.savefig(placeholder)
             plt.close(placeholder)
 
-        # ----- Page 5: constrained PC-space distance matrices -----
-        if build_mean_distance_matrices_figure is not None:
-            fig, _ = build_mean_distance_matrices_figure(
-                walks_pc, args.tp_start_1based, args.tp_end_1based,
-                axis_names=('PC1', 'PC2', 'PC3'),
-                space_label='PC space',
-                global_colorbar=args.global_colorbar,
-                axis_caps_nm=args.pc_distance_caps_nm)
-            pdf.savefig(fig)
-            plt.close(fig)
+        # ----- Per PC frame: cartoon page, then PC parabola + PC matrices -----
+        for frame in args.pc_frames:
+            cartoon_fig = build_pc_frame_cartoon_figure(frame, walks)
+            pdf.savefig(cartoon_fig)
+            plt.close(cartoon_fig)
+            label = f'PC space ({frame})'
+            if build_mean_parabola_xyz_figure is not None:
+                fig, _, _ = build_mean_parabola_xyz_figure(
+                    pc_parabola_walks[frame],
+                    args.parabola_tp_start_1based,
+                    args.parabola_tp_end_1based,
+                    n_tp_in_range=parabola_n_vertices,
+                    axis_names=('PC1', 'PC2', 'PC3'),
+                    space_label=label)
+                pdf.savefig(fig)
+                plt.close(fig)
+            if build_mean_distance_matrices_figure is not None:
+                fig, _ = build_mean_distance_matrices_figure(
+                    pc_walks[frame], args.tp_start_1based, args.tp_end_1based,
+                    axis_names=('PC1', 'PC2', 'PC3'),
+                    space_label=label,
+                    global_colorbar=args.global_colorbar,
+                    axis_caps_nm=args.pc_distance_caps_nm)
+                pdf.savefig(fig)
+                plt.close(fig)
 
         # ----- Pages 6+: per-walk report cards (full mode only) -----
         if not args.compact:
@@ -2386,17 +2745,18 @@ def main():
     # underlying data, support filter, weighting, and fit as the 3D panel
     # of the global parabola page -- numbers are identical.
     if build_mean_parabola_3d_only_figure is not None:
-        for space_label, slice_walks, slice_n in (
-                ('XYZ', parabola_walks, parabola_n_vertices),
-                ('PC space', parabola_walks_pc, parabola_n_vertices)):
-            tag = 'xyz' if space_label == 'XYZ' else 'pc'
+        sidecars = [('XYZ', 'xyz', parabola_walks)]
+        for frame in args.pc_frames:
+            sidecars.append((f'PC space ({frame})', f'pc_{frame}',
+                             pc_parabola_walks[frame]))
+        for space_label, tag, slice_walks in sidecars:
             side_path = os.path.join(
                 args.outdir, f'{args.output_prefix}_parabola_3d_{tag}.pdf')
             fig_side, _, _ = build_mean_parabola_3d_only_figure(
                 slice_walks,
                 args.parabola_tp_start_1based,
                 args.parabola_tp_end_1based,
-                n_tp_in_range=slice_n,
+                n_tp_in_range=parabola_n_vertices,
                 space_label=space_label)
             fig_side.savefig(side_path)
             plt.close(fig_side)
