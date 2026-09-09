@@ -107,6 +107,19 @@ try:
 except ImportError:
     WURLITZER_AVAILABLE = False
 
+_KLUT_CACHE = {}
+
+
+def _get_klut_table():
+    """Lazily initialize KnotLookupTable per-process (fork-safe)."""
+    pid = os.getpid()
+    if pid not in _KLUT_CACHE:
+        try:
+            _KLUT_CACHE[pid] = knoodle.KnotLookupTable() if KNOTID_AVAILABLE else None
+        except Exception:
+            _KLUT_CACHE[pid] = None
+    return _KLUT_CACHE[pid]
+
 # ---------------------------------------------------------------------------
 # Vendored helper imports (sibling files in this repo)
 # ---------------------------------------------------------------------------
@@ -534,14 +547,45 @@ def get_all_component_codes(analyzer):
     return all_pd, all_gauss
 
 
-def calculate_knot_properties(curve):
-    """Return (knot_name, determinant) for an (n_vertices, 3) curve.
+def _knot_name_from_determinant(det):
+    """Derive knot classification from Alexander polynomial determinant."""
+    if det == 1:
+        return '0_1'
+    if det == 3:
+        return '3_1'
+    return 'Complex'
 
-    Requires KnotoID + knoodle. Returns ('Unavailable', nan) if not installed.
+
+def calculate_knot_properties(curve, determinant_only=False):
+    """Return (knot_name, determinant, knot_name_knoodle) for an (n_vertices, 3) curve.
+
+    knot_name: from KnotoID (projection-based) or determinant-derived.
+    determinant: |Alexander(-1)|.
+    knot_name_knoodle: from KnotLookupTable (MacLeod code table lookup),
+        or '' if the table is unavailable or the knot is not in the table.
     """
     if not KNOTID_AVAILABLE:
-        return 'Unavailable', float('nan')
+        return 'Unavailable', float('nan'), ''
     try:
+        coords = [float(c) for pt in curve for c in pt]
+        analyzer = knoodle.KnotAnalyzer(coords, simplify=True, simplify_level=5)
+        get_all_component_codes(analyzer)
+        alexander_value = analyzer.alexander([-1.0])[0].to_double()
+        determinant = abs(alexander_value)
+        rounded = round(determinant)
+        if abs(determinant - rounded) < 1e-10:
+            determinant = float(rounded)
+        klut_name = ''
+        klut = _get_klut_table()
+        if klut is not None:
+            try:
+                result = klut.lookup(analyzer)
+                if result is not None:
+                    klut_name = result
+            except Exception:
+                pass
+        if determinant_only:
+            return _knot_name_from_determinant(determinant), determinant, klut_name
         if WURLITZER_AVAILABLE:
             with pipes():
                 k = KnotoID(projections_list='internal',
@@ -553,18 +597,10 @@ def calculate_knot_properties(curve):
             k.analyze_curve(curve)
         rez = k.curve_analysis
         knot_name = rez.loc[0, 'Name'] if len(rez) > 0 else 'Unknown'
-        coords = [float(c) for pt in curve for c in pt]
-        analyzer = knoodle.KnotAnalyzer(coords, simplify=True, simplify_level=5)
-        get_all_component_codes(analyzer)
-        alexander_value = analyzer.alexander([-1.0])[0].to_double()
-        determinant = abs(alexander_value)
-        rounded = round(determinant)
-        if abs(determinant - rounded) < 1e-10:
-            determinant = float(rounded)
-        return knot_name, determinant
+        return knot_name, determinant, klut_name
     except Exception as exc:
         print(f'Error calculating knot properties: {exc}')
-        return 'Error', float('nan')
+        return 'Error', float('nan'), ''
 
 
 # ===========================================================================
@@ -726,7 +762,7 @@ def generate_random_polygons(n_polygons, n_vertices, convex_hull=None,
             poly = generate_random_polygon_in_hull(convex_hull, n_vertices)
         else:
             poly = np.random.uniform(-5e-7, 5e-7, (n_vertices, 3))
-        name, det = calculate_knot_properties(poly)
+        name, det, _ = calculate_knot_properties(poly)
         results.append((name, det))
     return results
 
@@ -797,7 +833,7 @@ def generate_globule_polygons(samples_per_file, globule_dir, n_segments,
         poly = load_unknotted_globule_file(fp)
         for _ in range(samples_per_file):
             seg = segment_and_sample_polygon(poly, n_segments, segment_method)
-            name, det = calculate_knot_properties(seg)
+            name, det, _ = calculate_knot_properties(seg)
             results.append((name, det))
     return results
 
@@ -1017,15 +1053,18 @@ def _flags_from_args(args):
         'xyCN': bool(args.xyCN),
         'xzCN': bool(args.xzCN),
         'yzCN': bool(args.yzCN),
+        'no_knot_type': bool(getattr(args, 'no_knot_type', False)),
     }
 
 
 def _walk_metric_worker(payload):
     wid, curve, flags = payload
     out = {'WalkID': wid, 'n_vertices': int(curve.shape[0])}
-    name, det = calculate_knot_properties(curve)
+    name, det, klut_name = calculate_knot_properties(
+        curve, determinant_only=flags.get('no_knot_type', False))
     out['knot_type'] = name
     out['determinant'] = det
+    out['knot_type_knoodle'] = klut_name
     out['classified'] = classify_name(name)
     out['is_unknot'] = int(name == '0_1')
     if flags['acn']:
@@ -1065,7 +1104,8 @@ def _control_metric_worker(payload):
 
 def _control_knot_worker(curve):
     """Pickle-safe wrapper so a pool can fan out calculate_knot_properties."""
-    return calculate_knot_properties(curve)
+    name, det, _ = calculate_knot_properties(curve)
+    return name, det
 
 
 def _morans_worker(payload):
@@ -2034,7 +2074,7 @@ def build_pc_frame_cartoon_figure(mode, walks):
 # Compact-mode CSV writer.
 # ===========================================================================
 _COMPACT_COLUMNS = (
-    'WalkID', 'knot_type', 'ACN', 'xyCN', 'yzCN', 'xzCN', 'RoG', 'RMS_writhe',
+    'WalkID', 'knot_type', 'knot_type_knoodle', 'determinant', 'ACN', 'xyCN', 'yzCN', 'xzCN', 'RoG', 'RMS_writhe',
 )
 
 
@@ -2049,9 +2089,11 @@ def write_compact_summary_csv(rows, output_csv):
     """
     # Map internal metric names -> compact column names
     col_map = {
-        'WalkID':      ('WalkID',      None),
-        'knot_type':   ('knot_type',   None),
-        'ACN':         ('acn',         None),
+        'WalkID':            ('WalkID',            None),
+        'knot_type':         ('knot_type',         None),
+        'knot_type_knoodle': ('knot_type_knoodle', None),
+        'determinant':       ('determinant',       None),
+        'ACN':               ('acn',               None),
         'xyCN':        ('xyCN',        None),
         'yzCN':        ('yzCN',        None),
         'xzCN':        ('xzCN',        None),
@@ -2170,6 +2212,15 @@ def _parse_args():
         '--morans_output_csv', type=str, default=None,
         help="Where to write the per-walk Moran's I CSV. Default: "
              '{outdir}/{output_prefix}_morans_i_results.csv.')
+    p.add_argument(
+        '--skip_morans', action='store_true',
+        help="Skip Moran's I computation entirely. Useful for large datasets "
+             "where the permutation test is the bottleneck.")
+    p.add_argument(
+        '--no_knot_type', action='store_true',
+        help="Skip KnotoID projection analysis (the slow knot step). "
+             "Still computes knot determinant via knoodle and derives "
+             "knotted/unknotted classification from it.")
     p.add_argument(
         '--morans_cache_csv', type=str, default=None,
         help='Optional path to a previously computed per-walk Moran\'s I CSV. '
@@ -2496,7 +2547,10 @@ def main():
     else:
         morans_i_dict = {}
 
-    if not morans_i_dict:
+    if args.skip_morans:
+        print("\nSkipping Moran's I computation (--skip_morans).")
+        morans_i_dict = {}
+    elif not morans_i_dict:
         cycle_bins = (args.genome_cycle_bins
                       if args.genome_cycle_bins is not None else n_vertices)
         mapping = ('absolute_0based_tp_indices' if args.morans_absolute_tp

@@ -39,11 +39,47 @@ so the downstream tables can carry that metadata.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
 
 
 EPSILON = 1e-10
+
+# ---------------------------------------------------------------------------
+# Try to load the compiled C backend (morans_i_c.so next to this file).
+# ---------------------------------------------------------------------------
+_C_LIB = None
+_so_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'morans_i_c.so')
+try:
+    _C_LIB = ctypes.CDLL(_so_path)
+    _C_LIB.morans_i_permtest.restype = None
+    _C_LIB.morans_i_permtest.argtypes = [
+        ctypes.POINTER(ctypes.c_double),   # coords  (N*3)
+        ctypes.POINTER(ctypes.c_int),      # gpos    (N)
+        ctypes.c_int,                      # N
+        ctypes.c_int,                      # cycle_bins
+        ctypes.c_int,                      # n_perms
+        ctypes.c_int,                      # exclude_leq
+        ctypes.c_uint64,                   # seed
+        ctypes.POINTER(ctypes.c_double),   # out     (5)
+    ]
+    _C_LIB.morans_i_batch.restype = None
+    _C_LIB.morans_i_batch.argtypes = [
+        ctypes.POINTER(ctypes.c_double),   # all_coords (n_walks*N*3)
+        ctypes.POINTER(ctypes.c_int),      # gpos       (N)
+        ctypes.c_int,                      # N
+        ctypes.c_int,                      # n_walks
+        ctypes.c_int,                      # cycle_bins
+        ctypes.c_int,                      # n_perms
+        ctypes.c_int,                      # exclude_leq
+        ctypes.c_uint64,                   # seed
+        ctypes.POINTER(ctypes.c_double),   # out (n_walks*5)
+    ]
+except OSError:
+    _C_LIB = None
 
 
 def _circular_chain_offset_matrix(N):
@@ -103,7 +139,8 @@ def _circular_standardize(genomic_positions, cycle_bins):
     angles = np.asarray(genomic_positions, dtype=float) * (2.0 * np.pi / cycle_bins)
     mean_cos = float(np.mean(np.cos(angles)))
     mean_sin = float(np.mean(np.sin(angles)))
-    X_bar = np.arctan2(mean_sin, mean_cos)
+    R = np.sqrt(mean_cos * mean_cos + mean_sin * mean_sin)
+    X_bar = 0.0 if R < 1e-12 else float(np.arctan2(mean_sin, mean_cos))
     diff = angles - X_bar
     d = np.arctan2(np.sin(diff), np.cos(diff))
     std_dev = float(np.sqrt(np.mean(d * d)))
@@ -185,6 +222,34 @@ def _permute_once(W, base_positions, cycle_bins, observed_i, rng):
     return _morans_i_core(W, d)
 
 
+def _permutation_test_c(spatial_coords, genomic_positions, N, cycle_bins,
+                        n_permutations, exclude_leq, seed):
+    """Call the C shared-library permutation test for one walk."""
+    coords_c = np.ascontiguousarray(spatial_coords, dtype=np.float64)
+    gpos_c = np.ascontiguousarray(genomic_positions, dtype=np.int32)
+    out = np.empty(5, dtype=np.float64)
+    c_seed = ctypes.c_uint64(seed if seed is not None else 0)
+    _C_LIB.morans_i_permtest(
+        coords_c.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        gpos_c.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        ctypes.c_int(N),
+        ctypes.c_int(cycle_bins),
+        ctypes.c_int(n_permutations),
+        ctypes.c_int(exclude_leq),
+        c_seed,
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+    )
+    return {
+        'I_observed': float(out[0]),
+        'P_value': float(out[1]),
+        'n_permutations_valid': int(out[4]),
+        'n_permutations_requested': n_permutations,
+        'empirical_mean': float(out[2]),
+        'empirical_std': float(out[3]),
+        'exclude_circular_genomic_offsets_leq': int(exclude_leq),
+    }
+
+
 def permutation_test(spatial_coords, genomic_positions,
                      cycle_bins=None, n_permutations=999, seed=None,
                      exclude_circular_genomic_offsets_leq=0):
@@ -208,9 +273,13 @@ def permutation_test(spatial_coords, genomic_positions,
     if exclude_circular_genomic_offsets_leq < 0:
         raise ValueError('exclude_circular_genomic_offsets_leq must be >= 0.')
 
-    # Precompute once: the (optionally masked) spatial weight matrix is
-    # constant across permutations; only the genomic-position vector
-    # changes between permutations.
+    # ---- fast C path ----
+    if _C_LIB is not None:
+        return _permutation_test_c(
+            spatial_coords, genomic_positions, N, cycle_bins,
+            n_permutations, exclude_circular_genomic_offsets_leq, seed)
+
+    # ---- pure-Python fallback ----
     W = _inverse_distance_weights(
         spatial_coords,
         exclude_circular_genomic_offsets_leq=exclude_circular_genomic_offsets_leq)
@@ -322,6 +391,69 @@ def compute_for_walks(walks, tp_indices_0based, *,
         mapping = 'range_relative_0_to_N-1'
 
     total = len(walks)
+    wids = list(walks.keys())
+
+    # ---- C batch path: pack all coords, call once ----
+    if _C_LIB is not None and total > 0:
+        for wid in wids:
+            if walks[wid].shape[0] != N:
+                raise ValueError(
+                    f'Walk {wid}: curve has {walks[wid].shape[0]} '
+                    f'points but expected {N}')
+        all_coords = np.ascontiguousarray(
+            np.stack([walks[w] for w in wids]), dtype=np.float64)
+        gpos_c = np.ascontiguousarray(genomic_positions, dtype=np.int32)
+        out_buf = np.empty(total * 5, dtype=np.float64)
+        c_seed = ctypes.c_uint64(seed if seed is not None else 0)
+        if progress is not None:
+            progress(wids[0], 0, total)
+        _C_LIB.morans_i_batch(
+            all_coords.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+            gpos_c.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            ctypes.c_int(N),
+            ctypes.c_int(total),
+            ctypes.c_int(cb),
+            ctypes.c_int(n_permutations),
+            ctypes.c_int(exclude_circular_genomic_offsets_leq),
+            c_seed,
+            out_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+        )
+        if progress is not None:
+            progress(wids[-1], total - 1, total)
+        for idx, wid in enumerate(wids):
+            o = out_buf[idx * 5:(idx + 1) * 5]
+            is_sig = bool(o[1] < alpha)
+            rows.append({
+                'WalkID': wid,
+                'n_points': int(N),
+                'tp_start_0based': int(tp_indices_0based[0]),
+                'tp_end_0based': int(tp_indices_0based[-1]),
+                'tp_start_1based': int(tp_indices_0based[0]) + 1,
+                'tp_end_1based': int(tp_indices_0based[-1]) + 1,
+                'I_value': float(o[0]),
+                'P_value': float(o[1]),
+                'empirical_mean': float(o[2]),
+                'empirical_std': float(o[3]),
+                'n_permutations_requested': int(n_permutations),
+                'n_permutations_valid': int(o[4]),
+                'is_significant': is_sig,
+                'alpha': float(alpha),
+                'cycle_bins': int(cb),
+                'genomic_position_mapping': mapping,
+                'exclude_circular_genomic_offsets_leq':
+                    int(exclude_circular_genomic_offsets_leq),
+            })
+            by_walk[wid] = {
+                'I_value': float(o[0]),
+                'P_value': float(o[1]),
+                'is_significant': is_sig,
+                'n_points': int(N),
+                'exclude_circular_genomic_offsets_leq':
+                    int(exclude_circular_genomic_offsets_leq),
+            }
+        return rows, by_walk
+
+    # ---- pure-Python fallback ----
     for idx, (wid, curve) in enumerate(walks.items()):
         if progress is not None:
             progress(wid, idx, total)
