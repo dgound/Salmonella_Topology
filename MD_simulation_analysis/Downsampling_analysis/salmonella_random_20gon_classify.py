@@ -3,8 +3,9 @@
 Salmonella Simulations Random Sampling Knot Type Classification
 
 For each chain and each valid stride, produce downsampled polygons using one
-of four methods: stride (one random point per chunk), uniform (N random
-points from the whole chain), systematic (deterministic every-Nth-point),
+of five methods: stride (one random point per chunk), uniform (N random
+points from the whole chain), arclength (N independent uniform positions
+along the closed contour), systematic (deterministic every-Nth-point),
 or centroid (mean of each chunk).
 
 Supports .tsv (tab-delimited) and .dat (space-delimited with integer header
@@ -252,39 +253,86 @@ def downsample_centroid(points, stride):
     return centroids
 
 
-def sample_random_polygons(points, stride, num_samples, rng):
-    """Sample random polygons by picking one point per chunk.
+def sample_random_polygons(points, stride, num_samples, rng, replace=True):
+    """Sample De Witt L-gons by picking one point per chunk.
 
-    For a given stride, splits the chain into (LENGTH // stride) chunks of
-    (stride) points each. For each sample, picks one random index per chunk.
-
-    Returns list of numpy arrays of shape (num_chunks, 3).
+    replace=True (default): each sample's indices are drawn independently
+        across the num_samples samples (current behavior).
+    replace=False: per chunk, draw a single random permutation of the chunk's
+        indices; sample i uses the i-th element of every chunk's permutation.
+        Requires num_samples <= chunk_size (caller must enforce).
     """
     num_chunks = len(points) // stride
     chunk_size = stride
 
+    if replace:
+        samples = []
+        for _ in range(num_samples):
+            indices = []
+            for chunk_idx in range(num_chunks):
+                start = chunk_idx * chunk_size
+                idx = start + rng.integers(0, chunk_size)
+                indices.append(idx)
+            samples.append(points[indices])
+        return samples
+
+    if num_samples > chunk_size:
+        raise ValueError(f"num_samples={num_samples} > chunk_size={chunk_size} with replace=False")
+    perm_matrix = np.empty((num_samples, num_chunks), dtype=np.int64)
+    for chunk_idx in range(num_chunks):
+        perm = rng.permutation(chunk_size)[:num_samples]
+        perm_matrix[:, chunk_idx] = chunk_idx * chunk_size + perm
+    return [points[perm_matrix[i]] for i in range(num_samples)]
+
+
+def sample_random_polygons_uniform(points, stride, num_samples, rng, replace=True):
+    """Sample L-gons by picking N random points from the whole chain.
+
+    replace=True (default): each sample picks L random indices independently.
+    replace=False: pre-draw num_samples * L distinct indices from the whole
+        chain, then partition them into num_samples groups of L (each sorted).
+        Requires num_samples * L <= len(points).
+    """
+    n_points = len(points) // stride
+    if replace:
+        samples = []
+        for _ in range(num_samples):
+            indices = sorted(rng.choice(len(points), size=n_points, replace=False))
+            samples.append(points[indices])
+        return samples
+
+    if num_samples * n_points > len(points):
+        raise ValueError(
+            f"num_samples={num_samples} * L={n_points} > chain length {len(points)} with replace=False")
+    pool = rng.choice(len(points), size=num_samples * n_points, replace=False)
     samples = []
-    for _ in range(num_samples):
-        indices = []
-        for chunk_idx in range(num_chunks):
-            start = chunk_idx * chunk_size
-            idx = start + rng.integers(0, chunk_size)
-            indices.append(idx)
-        samples.append(points[indices])
+    for i in range(num_samples):
+        idx = np.sort(pool[i * n_points:(i + 1) * n_points])
+        samples.append(points[idx])
     return samples
 
 
-def sample_random_polygons_uniform(points, stride, num_samples, rng):
-    """Sample random polygons by picking N random points from the whole chain.
+def sample_random_polygons_arclength(points, stride, num_samples, rng):
+    """Sample L-gons by uniform arclength sampling on the closed contour.
 
-    Picks N = len(points) // stride random indices, sorts them to maintain
-    chain order.
+    The contour is the closed polygon points[0] -> ... -> points[-1] -> points[0].
+    Each sample draws L = len(points) // stride positions independently and
+    uniformly in [0, total_length), sorts them (contour order), and linearly
+    interpolates each position on its segment. No closing vertex is appended:
+    the classifier closes the L-gon with a straight segment.
     """
     n_points = len(points) // stride
+    nxt = np.roll(points, -1, axis=0)
+    seg_len = np.linalg.norm(nxt - points, axis=1)
+    cum = np.concatenate(([0.0], np.cumsum(seg_len)))
+    total = cum[-1]
+
     samples = []
     for _ in range(num_samples):
-        indices = sorted(rng.choice(len(points), size=n_points, replace=False))
-        samples.append(points[indices])
+        s = np.sort(rng.uniform(0.0, total, size=n_points))
+        seg = np.searchsorted(cum, s, side="right") - 1
+        t = (s - cum[seg]) / seg_len[seg]
+        samples.append(points[seg] + t[:, None] * (nxt[seg] - points[seg]))
     return samples
 
 
@@ -298,7 +346,7 @@ def analyze_stride_random_samples(args):
     import knoodle
 
     filepath, filename, stride, file_index, num_samples, method, chain_length, \
-        use_closure, n_directions = args
+        use_closure, n_directions, replace = args
     target_length = chain_length // stride
     results = []
 
@@ -314,9 +362,11 @@ def analyze_stride_random_samples(args):
         else:
             rng = np.random.default_rng(42 + file_index * chain_length + stride)
             if method == "uniform":
-                samples = sample_random_polygons_uniform(points, stride, num_samples, rng)
+                samples = sample_random_polygons_uniform(points, stride, num_samples, rng, replace=replace)
+            elif method == "arclength":
+                samples = sample_random_polygons_arclength(points, stride, num_samples, rng)
             else:
-                samples = sample_random_polygons(points, stride, num_samples, rng)
+                samples = sample_random_polygons(points, stride, num_samples, rng, replace=replace)
 
         for sample_id, sample_points in enumerate(samples):
             try:
@@ -440,10 +490,12 @@ def parse_args():
     )
     parser.add_argument(
         "--method",
-        choices=["stride", "uniform", "systematic", "centroid"],
+        choices=["stride", "uniform", "arclength", "systematic", "centroid"],
         default="stride",
         help="Sampling method: stride (one random point per chunk), "
              "uniform (N random points from entire chain), "
+             "arclength (N independent uniform positions along the closed "
+             "contour, interpolated, in contour order), "
              "systematic (deterministic every-Nth-point), "
              "or centroid (mean of each chunk)"
     )
@@ -454,6 +506,26 @@ def parse_args():
     parser.add_argument(
         "--directions", type=int, default=100,
         help="Number of sphere directions for dominant closure (default: 100)"
+    )
+    parser.add_argument(
+        "--no-replacement", action="store_true",
+        help="Sample chain points without replacement across the num-samples "
+             "polygons of each (chain, stride). Per-stride cap = stride for "
+             "the stride method, or chain_length // L for the uniform method; "
+             "applied automatically with a message. No-op for arclength / systematic / centroid."
+    )
+    parser.add_argument(
+        "--num-files",
+        type=int,
+        default=None,
+        help="Randomly subsample this many structure files from polygon_dir "
+             "(default: process all)."
+    )
+    parser.add_argument(
+        "--file-seed",
+        type=int,
+        default=42,
+        help="Random seed for --num-files subsampling (default: 42)."
     )
     return parser.parse_args()
 
@@ -468,6 +540,9 @@ def main():
     chain_length = args.length
     use_closure = args.closure
     n_directions = args.directions
+    replace = not args.no_replacement
+    num_files = args.num_files
+    file_seed = args.file_seed
 
     print("=" * 60)
     print("Salmonella Random Sampling Knot Type Classification")
@@ -476,6 +551,7 @@ def main():
     print(f"Sampling method: {method}")
     if method not in ("systematic", "centroid"):
         print(f"Samples per chain per stride: {num_samples}")
+        print(f"Replacement: {'no' if args.no_replacement else 'yes'}")
     if use_closure:
         print(f"Closure: dominant closure ({n_directions} directions)")
     if complex_lengths:
@@ -493,6 +569,12 @@ def main():
     if not all_files:
         print("ERROR: No structure files found!")
         sys.exit(1)
+
+    if num_files is not None and num_files < len(all_files):
+        import random as _random
+        _random.seed(file_seed)
+        all_files = sorted(_random.sample(all_files, num_files))
+        print(f"Subsampled {num_files} of {len(all_files)} files (seed={file_seed})")
 
     all_filenames = [os.path.basename(f) for f in all_files]
 
@@ -516,20 +598,37 @@ def main():
         print(f"  Skipping strides (marked Complex): {skip_strides}")
         print(f"  Skipped lengths: {[chain_length // s for s in skip_strides]}")
 
+    # Determine per-stride num_samples cap when --no-replacement is set.
+    # stride method: cap at chunk_size = stride; uniform method: cap at chain_length // L = stride.
+    # systematic / centroid: deterministic, only 1 sample anyway.
+    samples_per_stride = {s: num_samples for s in compute_strides}
+    if args.no_replacement and method in ("stride", "uniform"):
+        capped_msgs = []
+        for s in compute_strides:
+            if num_samples > s:
+                samples_per_stride[s] = s
+                capped_msgs.append(f"stride={s}: {num_samples} -> {s}")
+        if capped_msgs:
+            print("\n[INFO] --no-replacement: capped num_samples for some strides:")
+            for m in capped_msgs:
+                print(f"       {m}")
+
     # Build tasks: (filepath, filename, stride, file_index, num_samples, method,
-    #               chain_length, use_closure, n_directions)
+    #               chain_length, use_closure, n_directions, replace)
     all_tasks = []
     print("\n  Creating tasks...")
     for file_index, filename in enumerate(all_filenames):
         filepath = os.path.join(polygon_dir, filename)
         for stride in compute_strides:
             all_tasks.append((
-                filepath, filename, stride, file_index, num_samples, method,
-                chain_length, use_closure, n_directions
+                filepath, filename, stride, file_index, samples_per_stride[stride], method,
+                chain_length, use_closure, n_directions, replace
             ))
 
-    samples_per_task = 1 if method in ("systematic", "centroid") else num_samples
-    total_classifications = len(all_tasks) * samples_per_task
+    if method in ("systematic", "centroid"):
+        total_classifications = len(all_tasks)
+    else:
+        total_classifications = len(all_filenames) * sum(samples_per_stride[s] for s in compute_strides)
     print(f"\n  Total analysis tasks: {len(all_tasks)}")
     print(f"  Total classifications: {total_classifications}")
 
@@ -552,7 +651,8 @@ def main():
     for filename in all_filenames:
         for stride in skip_strides:
             length = chain_length // stride
-            for sample_id in range(samples_per_task):
+            n_per = 1 if method in ("systematic", "centroid") else samples_per_stride.get(stride, num_samples)
+            for sample_id in range(n_per):
                 row = {
                     "filename": filename,
                     "sample_id": sample_id,
