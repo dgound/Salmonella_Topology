@@ -390,13 +390,17 @@ def _draw_stacked_area(ax, df_raw, percentages, title_str=None, x_start=None, sm
             y = np.zeros(len(x), dtype=float)
 
         if not np.all(y == 0):
+            # Opaque fill pre-blended with the white background (same look as
+            # alpha=0.9) plus a same-color edge, so adjacent bands leave no
+            # anti-aliasing seams or grid lines showing through.
+            color = tuple(0.9 * c + 0.1 for c in mcolors.to_rgb(color))
             if group_key.startswith("Complex_"):
                 has_complex = True
                 ax.fill_between(x, bottoms, bottoms + y,
-                                color=color, alpha=0.9)
+                                facecolor=color, edgecolor=color, linewidth=0.5)
             else:
                 ax.fill_between(x, bottoms, bottoms + y,
-                                color=color, alpha=0.9)
+                                facecolor=color, edgecolor=color, linewidth=0.5)
             bottoms = bottoms + y
 
     # Add dotted lines at Arsuaga length (20) meeting at unknotted percentage

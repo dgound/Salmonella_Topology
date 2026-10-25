@@ -30,12 +30,10 @@ import sys
 import argparse
 import multiprocessing
 
-# Threading config: sequential run, all threads to knoodle
-# THREADS_PER_PROCESS = 5
-# MAX_THREADS = multiprocessing.cpu_count()
-# NUM_WORKERS = max(1, (MAX_THREADS - 1) // THREADS_PER_PROCESS)
-THREADS_PER_PROCESS = multiprocessing.cpu_count()
-NUM_WORKERS = 1
+# Threading config: knoodle gains nothing from extra threads, so run
+# single-threaded workers in parallel, leaving some cores free.
+THREADS_PER_PROCESS = 1
+NUM_WORKERS = min(12, multiprocessing.cpu_count())
 
 # Set internal threading BEFORE other imports
 os.environ["OMP_NUM_THREADS"] = str(THREADS_PER_PROCESS)
@@ -364,7 +362,11 @@ def analyze_stride_random_samples(args):
             if method == "uniform":
                 samples = sample_random_polygons_uniform(points, stride, num_samples, rng, replace=replace)
             elif method == "arclength":
-                samples = sample_random_polygons_arclength(points, stride, num_samples, rng)
+                if stride == 1:
+                    # Full length: the original chain (starting configuration), once.
+                    samples = [points]
+                else:
+                    samples = sample_random_polygons_arclength(points, stride, num_samples, rng)
             else:
                 samples = sample_random_polygons(points, stride, num_samples, rng, replace=replace)
 
@@ -495,7 +497,8 @@ def parse_args():
         help="Sampling method: stride (one random point per chunk), "
              "uniform (N random points from entire chain), "
              "arclength (N independent uniform positions along the closed "
-             "contour, interpolated, in contour order), "
+             "contour, interpolated, in contour order; the full length is "
+             "the original chain, classified once), "
              "systematic (deterministic every-Nth-point), "
              "or centroid (mean of each chunk)"
     )
@@ -612,6 +615,10 @@ def main():
             print("\n[INFO] --no-replacement: capped num_samples for some strides:")
             for m in capped_msgs:
                 print(f"       {m}")
+
+    # arclength: the full length is the original chain, classified once.
+    if method == "arclength" and 1 in samples_per_stride:
+        samples_per_stride[1] = 1
 
     # Build tasks: (filepath, filename, stride, file_index, num_samples, method,
     #               chain_length, use_closure, n_directions, replace)
