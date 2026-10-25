@@ -25,6 +25,32 @@ void GenomicMoransICalculator::validate_input(const std::vector<Point3D>& spatia
     }
 }
 
+// Circular deviations of timepoint angles from their circular mean; returns their RMS
+static double circular_deviations(const std::vector<int>& positions, double cycle_bins,
+                                  std::vector<double>& d_theta_vals) {
+    const size_t n = positions.size();
+    d_theta_vals.resize(n);
+    
+    double sum_cos = 0.0, sum_sin = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double angle = positions[i] * 2.0 * M_PI / cycle_bins;
+        d_theta_vals[i] = angle;
+        sum_cos += std::cos(angle);
+        sum_sin += std::sin(angle);
+    }
+    double mean_cos = sum_cos / n;
+    double mean_sin = sum_sin / n;
+    double X_bar = std::atan2(mean_sin, mean_cos);
+    
+    double std_dev = 0.0;
+    for (double& val : d_theta_vals) {
+        double diff = val - X_bar;
+        val = std::atan2(std::sin(diff), std::cos(diff));
+        std_dev += val * val;
+    }
+    return std::sqrt(std_dev / n);
+}
+
 double GenomicMoransICalculator::compute_genomic_morans_i(
     const std::vector<Point3D>& spatial_coords,
     const std::vector<int>& genomic_positions) const {
@@ -34,66 +60,9 @@ double GenomicMoransICalculator::compute_genomic_morans_i(
     const size_t n = spatial_coords.size();
     std::cout << "Computing genomic Moran's I for " << n << " points..." << std::endl;
     
-    // Step 1: Compute spatial inverse distance weights (like Python pdist)
-    std::cout << "Computing spatial distance weights..." << std::endl;
-    std::vector<std::vector<double>> weights(n, std::vector<double>(n, 0.0));
-    
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-            double dist = spatial_coords[i].distance_to(spatial_coords[j]);
-            double weight = 1.0 / (dist * dist + EPSILON);
-            weights[i][j] = weight;
-            weights[j][i] = weight; // Symmetric
-        }
-        weights[i][i] = 0.0; // Diagonal is zero
-    }
-    
-    // Step 2: Row standardize weights
-    std::cout << "Row standardizing weights..." << std::endl;
-    row_standardize_weights(weights);
-    
-    // Step 3: Compute sum of weights
-    double W = 0.0;
-    for (const auto& row : weights) {
-        W += std::accumulate(row.begin(), row.end(), 0.0);
-    }
-    
-    if (W <= EPSILON) {
-        throw std::runtime_error("Sum of weights is zero or too small");
-    }
-    
-    // Step 4: Compute circular genomic variable (EXACTLY like Python)
     std::cout << "Computing circular genomic deviations..." << std::endl;
-    
-    // Map timepoints to angles: angles = X * 2 * π / 20
-    std::vector<double> angles(n);
-    for (size_t i = 0; i < n; ++i) {
-        angles[i] = genomic_positions[i] * 2.0 * M_PI / 20.0;
-    }
-    
-    // Compute circular mean (like Python)
-    double sum_cos = 0.0, sum_sin = 0.0;
-    for (double angle : angles) {
-        sum_cos += std::cos(angle);
-        sum_sin += std::sin(angle);
-    }
-    double mean_cos = sum_cos / n;
-    double mean_sin = sum_sin / n;
-    double X_bar = std::atan2(mean_sin, mean_cos);
-    
-    // Compute circular deviations (EXACTLY like Python)
-    std::vector<double> d_theta_vals(n);
-    for (size_t i = 0; i < n; ++i) {
-        double diff = angles[i] - X_bar;
-        d_theta_vals[i] = std::atan2(std::sin(diff), std::cos(diff));
-    }
-    
-    // Standardize deviations (like Python)
-    double std_dev = 0.0;
-    for (double val : d_theta_vals) {
-        std_dev += val * val;
-    }
-    std_dev = std::sqrt(std_dev / n);
+    std::vector<double> d_theta_vals;
+    double std_dev = circular_deviations(genomic_positions, cycle_bins_, d_theta_vals);
     
     if (std_dev > EPSILON) {
         for (double& val : d_theta_vals) {
@@ -103,18 +72,14 @@ double GenomicMoransICalculator::compute_genomic_morans_i(
         throw std::runtime_error("Standard deviation of circular deviations is zero");
     }
     
-    // Step 5: Compute Moran's I (like Python)
     std::cout << "Computing final Moran's I value..." << std::endl;
+    std::vector<double> numerator;
+    double W = stream_quadratic_forms(spatial_coords, d_theta_vals, 1, numerator);
     
-    // numerator = d_theta_vals @ weights @ d_theta_vals
-    double numerator = 0.0;
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = 0; j < n; ++j) {
-            numerator += d_theta_vals[i] * weights[i][j] * d_theta_vals[j];
-        }
+    if (W <= EPSILON) {
+        throw std::runtime_error("Sum of weights is zero or too small");
     }
     
-    // denominator = sum(d_theta_vals^2)
     double denominator = 0.0;
     for (double val : d_theta_vals) {
         denominator += val * val;
@@ -125,22 +90,97 @@ double GenomicMoransICalculator::compute_genomic_morans_i(
     }
     
     // I = (N / W) * (numerator / denominator)
-    double morans_i = (static_cast<double>(n) / W) * (numerator / denominator);
+    double morans_i = (static_cast<double>(n) / W) * (numerator[0] / denominator);
     return morans_i;
 }
 
-void GenomicMoransICalculator::row_standardize_weights(std::vector<std::vector<double>>& weights) const {
-    const size_t n = weights.size();
+double GenomicMoransICalculator::stream_quadratic_forms(
+    const std::vector<Point3D>& spatial_coords,
+    const std::vector<double>& D,
+    size_t ncol,
+    std::vector<double>& num_out) const {
     
+    const size_t n = spatial_coords.size();
+    std::vector<double> xs(n), ys(n), zs(n);
     for (size_t i = 0; i < n; ++i) {
-        double row_sum = std::accumulate(weights[i].begin(), weights[i].end(), 0.0);
+        xs[i] = spatial_coords[i].x;
+        ys[i] = spatial_coords[i].y;
+        zs[i] = spatial_coords[i].z;
+    }
+    
+    const unsigned int num_threads = std::thread::hardware_concurrency();
+    std::cout << "  Detected " << num_threads << " CPU threads available" << std::endl;
+    const size_t threads_to_use = std::max<size_t>(1, std::min<size_t>(num_threads, n));
+    std::cout << "  Streaming spatial weights over " << n << " rows x " << ncol
+              << " columns using " << threads_to_use << " threads..." << std::endl;
+    
+    // Row standardization is applied per row after its sum r_i is known, so W is never stored
+    auto worker = [&](size_t row_begin, size_t row_end, std::vector<double>& num) -> double {
+        const double* __restrict x = xs.data();
+        const double* __restrict y = ys.data();
+        const double* __restrict z = zs.data();
+        const double* __restrict Dp = D.data();
+        std::vector<double> partial(ncol);
+        double* __restrict p = partial.data();
+        double* __restrict nm = num.data();
+        double W = 0.0;
         
-        if (row_sum > EPSILON) {
+        for (size_t i = row_begin; i < row_end; ++i) {
+            std::fill(partial.begin(), partial.end(), 0.0);
+            const double xi = x[i], yi = y[i], zi = z[i];
+            double r_i = 0.0;
+            
             for (size_t j = 0; j < n; ++j) {
-                weights[i][j] /= row_sum;
+                if (j == i) continue;
+                const double dx = xi - x[j];
+                const double dy = yi - y[j];
+                const double dz = zi - z[j];
+                const double w = 1.0 / (dx * dx + dy * dy + dz * dz + EPSILON);
+                r_i += w;
+                const double* __restrict Dj = Dp + j * ncol;
+                for (size_t k = 0; k < ncol; ++k) {
+                    p[k] += w * Dj[k];
+                }
+            }
+            
+            const double* __restrict Di = Dp + i * ncol;
+            if (r_i > EPSILON) {
+                for (size_t k = 0; k < ncol; ++k) {
+                    nm[k] += Di[k] * p[k] / r_i;
+                }
+                W += 1.0;
+            } else {
+                for (size_t k = 0; k < ncol; ++k) {
+                    nm[k] += Di[k] * p[k];
+                }
+                W += r_i;
             }
         }
+        return W;
+    };
+    
+    std::vector<std::vector<double>> thread_num(threads_to_use, std::vector<double>(ncol, 0.0));
+    std::vector<std::future<double>> futures;
+    const size_t rows_per_thread = n / threads_to_use;
+    const size_t remaining_rows = n % threads_to_use;
+    size_t row_begin = 0;
+    
+    for (size_t t = 0; t < threads_to_use; ++t) {
+        size_t row_end = row_begin + rows_per_thread + (t < remaining_rows ? 1 : 0);
+        futures.push_back(std::async(std::launch::async, worker,
+            row_begin, row_end, std::ref(thread_num[t])));
+        row_begin = row_end;
     }
+    
+    double W = 0.0;
+    num_out.assign(ncol, 0.0);
+    for (size_t t = 0; t < threads_to_use; ++t) {
+        W += futures[t].get();
+        for (size_t k = 0; k < ncol; ++k) {
+            num_out[k] += thread_num[t][k];
+        }
+    }
+    return W;
 }
 
 double GenomicMoransICalculator::calculate_morans_i_core(
@@ -180,202 +220,6 @@ double GenomicMoransICalculator::calculate_morans_i_core(
     // I = (N / W) * (numerator / denominator)
     double morans_i = (static_cast<double>(n) / W) * (numerator / denominator);
     return morans_i;
-}
-
-// Result structure for permutation worker
-struct PermutationWorkerResult {
-    int count_greater_equal;
-    std::vector<double> morans_i_values;
-    
-    PermutationWorkerResult() : count_greater_equal(0) {}
-};
-
-// Helper function for multithreaded permutation worker
-PermutationWorkerResult permutation_worker(
-    const std::vector<Point3D>& spatial_coords,
-    const std::vector<int>& genomic_positions,
-    const std::vector<std::vector<double>>& weights,
-    double observed_morans_i,
-    int num_permutations,
-    int thread_id) {
-    
-    const size_t n = spatial_coords.size();
-    const double EPSILON = 1e-10;
-    
-    // Each thread gets its own random generator seeded differently
-    std::random_device rd;
-    std::mt19937 gen(rd() + thread_id);
-    
-    PermutationWorkerResult result;
-    result.morans_i_values.reserve(num_permutations);
-    std::vector<int> permuted_positions = genomic_positions;
-    
-    for (int perm = 0; perm < num_permutations; ++perm) {
-        // Randomly permute the genomic positions
-        std::shuffle(permuted_positions.begin(), permuted_positions.end(), gen);
-        
-        // Convert to circular coordinates and standardize
-        std::vector<double> angles(n);
-        for (size_t i = 0; i < n; ++i) {
-            angles[i] = permuted_positions[i] * 2.0 * M_PI / 20.0;
-        }
-        
-        // Compute circular mean
-        double sum_cos = 0.0, sum_sin = 0.0;
-        for (double angle : angles) {
-            sum_cos += std::cos(angle);
-            sum_sin += std::sin(angle);
-        }
-        double mean_cos = sum_cos / n;
-        double mean_sin = sum_sin / n;
-        double X_bar = std::atan2(mean_sin, mean_cos);
-        
-        // Compute circular deviations
-        std::vector<double> d_theta_vals(n);
-        for (size_t i = 0; i < n; ++i) {
-            double diff = angles[i] - X_bar;
-            d_theta_vals[i] = std::atan2(std::sin(diff), std::cos(diff));
-        }
-        
-        // Standardize deviations
-        double std_dev = 0.0;
-        for (double val : d_theta_vals) {
-            std_dev += val * val;
-        }
-        std_dev = std::sqrt(std_dev / n);
-        
-        if (std_dev > EPSILON) {
-            for (double& val : d_theta_vals) {
-                val /= std_dev;
-            }
-        }
-        
-        // Calculate Moran's I for this permutation
-        try {
-            // Inline core calculation to avoid creating calculator instance
-            double W = 0.0;
-            for (const auto& row : weights) {
-                W += std::accumulate(row.begin(), row.end(), 0.0);
-            }
-            
-            if (W <= EPSILON) continue;
-            
-            double numerator = 0.0;
-            for (size_t i = 0; i < n; ++i) {
-                for (size_t j = 0; j < n; ++j) {
-                    numerator += d_theta_vals[i] * weights[i][j] * d_theta_vals[j];
-                }
-            }
-            
-            double denominator = 0.0;
-            for (double val : d_theta_vals) {
-                denominator += val * val;
-            }
-            
-            if (denominator <= EPSILON) continue;
-            
-            double perm_morans_i = (static_cast<double>(n) / W) * (numerator / denominator);
-            
-            // Store the result
-            result.morans_i_values.push_back(perm_morans_i);
-            
-            if (perm_morans_i >= observed_morans_i) {
-                result.count_greater_equal++;
-            }
-        } catch (const std::exception& e) {
-            // Skip this permutation if calculation fails
-            continue;
-        }
-    }
-    
-    return result;
-}
-
-GenomicMoransICalculator::PermutationTestResult GenomicMoransICalculator::calculate_permutation_test(
-    const std::vector<Point3D>& spatial_coords,
-    const std::vector<int>& genomic_positions,
-    double observed_morans_i) const {
-    
-    const size_t n = spatial_coords.size();
-    const unsigned int num_threads = std::thread::hardware_concurrency();
-    std::cout << "  Detected " << num_threads << " CPU threads available" << std::endl;
-    //const unsigned int threads_to_use = std::min(num_threads, static_cast<unsigned int>(8)); // Cap at 8 threads
-    const unsigned int threads_to_use = num_threads;
-    
-    std::cout << "  Performing permutation test with " << PERMUTATIONS << " permutations using " 
-              << threads_to_use << " threads..." << std::endl;
-    
-    // Create spatial weights matrix (shared by all threads)
-    std::vector<std::vector<double>> weights(n, std::vector<double>(n, 0.0));
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-            double dist = spatial_coords[i].distance_to(spatial_coords[j]);
-            double weight = 1.0 / (dist * dist + EPSILON);
-            weights[i][j] = weight;
-            weights[j][i] = weight;
-        }
-        weights[i][i] = 0.0;
-    }
-    row_standardize_weights(weights);
-    
-    // Distribute permutations across threads
-    std::vector<std::future<PermutationWorkerResult>> futures;
-    int perms_per_thread = PERMUTATIONS / threads_to_use;
-    int remaining_perms = PERMUTATIONS % threads_to_use;
-    
-    for (unsigned int t = 0; t < threads_to_use; ++t) {
-        int thread_perms = perms_per_thread + (t < remaining_perms ? 1 : 0);
-        
-        futures.push_back(std::async(std::launch::async, permutation_worker,
-            std::cref(spatial_coords),
-            std::cref(genomic_positions), 
-            std::cref(weights),
-            observed_morans_i,
-            thread_perms,
-            static_cast<int>(t)));
-    }
-    
-    // Collect results from all threads
-    int total_count_greater_equal = 0;
-    std::vector<double> all_permutation_values;
-    
-    for (auto& future : futures) {
-        PermutationWorkerResult worker_result = future.get();
-        total_count_greater_equal += worker_result.count_greater_equal;
-        
-        // Combine all Moran's I values from all threads
-        all_permutation_values.insert(all_permutation_values.end(),
-            worker_result.morans_i_values.begin(),
-            worker_result.morans_i_values.end());
-    }
-    
-    // Calculate empirical statistics from all permutation results
-    double empirical_mean = 0.0;
-    double empirical_std = 0.0;
-    
-    if (!all_permutation_values.empty()) {
-        // Calculate mean
-        double sum = std::accumulate(all_permutation_values.begin(), all_permutation_values.end(), 0.0);
-        empirical_mean = sum / all_permutation_values.size();
-        
-        // Calculate standard deviation
-        double variance = 0.0;
-        for (double value : all_permutation_values) {
-            variance += (value - empirical_mean) * (value - empirical_mean);
-        }
-        variance /= all_permutation_values.size();
-        empirical_std = std::sqrt(variance);
-    }
-    
-    // Calculate p-value (one-tailed test for positive autocorrelation)
-    // Add 1 to both numerator and denominator to avoid p=0 (conservative approach)
-    double p_value = static_cast<double>(total_count_greater_equal + 1) / static_cast<double>(PERMUTATIONS + 1);
-    
-    std::cout << "  Permutation test complete: " << total_count_greater_equal 
-              << "/" << PERMUTATIONS << " permutations >= observed I" << std::endl;
-    std::cout << "  Empirical mean = " << empirical_mean << ", std = " << empirical_std << std::endl;
-    
-    return PermutationTestResult(p_value, empirical_mean, empirical_std, all_permutation_values.size());
 }
 
 double GenomicMoransICalculator::calculate_morans_i_variance(
@@ -427,35 +271,111 @@ double GenomicMoransICalculator::calculate_morans_i_variance(
 
 MoransIResult GenomicMoransICalculator::compute_genomic_morans_i_with_pvalue(
     const std::vector<Point3D>& spatial_coords,
-    const std::vector<int>& genomic_positions) const {
-    
+    const std::vector<int>& genomic_positions,
+    unsigned long long seed) const {
+
     validate_input(spatial_coords, genomic_positions);
-    
+
     std::cout << "Computing genomic Moran's I with p-value..." << std::endl;
     
     const size_t n = spatial_coords.size();
+    const size_t ncol = 1 + PERMUTATIONS;
+    std::cout << "Computing genomic Moran's I for " << n << " points..." << std::endl;
     
-    // First compute the observed Moran's I
-    double observed_i = compute_genomic_morans_i(spatial_coords, genomic_positions);
+    // Column 0: observed standardized deviations, columns 1..PERMUTATIONS: shuffled timepoints
+    std::cout << "Computing circular genomic deviations..." << std::endl;
+    std::vector<double> D(n * ncol);
+    std::vector<double> d_theta_vals;
+    double std_dev = circular_deviations(genomic_positions, cycle_bins_, d_theta_vals);
     
-    // Compute weights matrix for z-score calculation
-    std::cout << "Computing variance for z-score..." << std::endl;
-    std::vector<std::vector<double>> weights(n, std::vector<double>(n, 0.0));
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = i + 1; j < n; ++j) {
-            double dist = spatial_coords[i].distance_to(spatial_coords[j]);
-            double weight = 1.0 / (dist * dist + EPSILON);
-            weights[i][j] = weight;
-            weights[j][i] = weight;
-        }
-        weights[i][i] = 0.0;
+    if (std_dev <= EPSILON) {
+        throw std::runtime_error("Standard deviation of circular deviations is zero");
     }
-    row_standardize_weights(weights);
+    for (size_t i = 0; i < n; ++i) {
+        D[i * ncol] = d_theta_vals[i] / std_dev;
+    }
     
-    // Compute permutation test for p-value
-    PermutationTestResult perm_result = calculate_permutation_test(spatial_coords, genomic_positions, observed_i);
+    std::random_device rd;
+    std::mt19937 gen(seed != 0 ? static_cast<std::mt19937::result_type>(seed) : rd());
+    std::vector<int> permuted_positions = genomic_positions;
     
-    bool is_significant = perm_result.p_value < 0.05;
+    for (size_t k = 1; k < ncol; ++k) {
+        std::shuffle(permuted_positions.begin(), permuted_positions.end(), gen);
+        std_dev = circular_deviations(permuted_positions, cycle_bins_, d_theta_vals);
+        
+        if (std_dev > EPSILON) {
+            for (double& val : d_theta_vals) {
+                val /= std_dev;
+            }
+        }
+        for (size_t i = 0; i < n; ++i) {
+            D[i * ncol + k] = d_theta_vals[i];
+        }
+    }
     
-    return MoransIResult(observed_i, perm_result.p_value, is_significant);
+    std::cout << "  Performing permutation test with " << PERMUTATIONS
+              << " permutations in a single pass with the observed value..." << std::endl;
+    std::vector<double> num;
+    double W = stream_quadratic_forms(spatial_coords, D, ncol, num);
+    
+    if (W <= EPSILON) {
+        throw std::runtime_error("Sum of weights is zero or too small");
+    }
+    
+    std::vector<double> den(ncol, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t k = 0; k < ncol; ++k) {
+            double val = D[i * ncol + k];
+            den[k] += val * val;
+        }
+    }
+    
+    if (den[0] <= EPSILON) {
+        throw std::runtime_error("Denominator in Moran's I calculation is zero");
+    }
+    
+    double observed_i = (static_cast<double>(n) / W) * (num[0] / den[0]);
+    
+    int total_count_greater_equal = 0;
+    std::vector<double> all_permutation_values;
+    all_permutation_values.reserve(PERMUTATIONS);
+    
+    for (size_t k = 1; k < ncol; ++k) {
+        if (den[k] <= EPSILON) continue;
+        
+        double perm_morans_i = (static_cast<double>(n) / W) * (num[k] / den[k]);
+        all_permutation_values.push_back(perm_morans_i);
+        
+        if (perm_morans_i >= observed_i) {
+            total_count_greater_equal++;
+        }
+    }
+    
+    // Calculate empirical statistics from all permutation results
+    double empirical_mean = 0.0;
+    double empirical_std = 0.0;
+    
+    if (!all_permutation_values.empty()) {
+        double sum = std::accumulate(all_permutation_values.begin(), all_permutation_values.end(), 0.0);
+        empirical_mean = sum / all_permutation_values.size();
+        
+        double variance = 0.0;
+        for (double value : all_permutation_values) {
+            variance += (value - empirical_mean) * (value - empirical_mean);
+        }
+        variance /= all_permutation_values.size();
+        empirical_std = std::sqrt(variance);
+    }
+    
+    // Calculate p-value (one-tailed test for positive autocorrelation)
+    // Add 1 to both numerator and denominator to avoid p=0 (conservative approach)
+    double p_value = static_cast<double>(total_count_greater_equal + 1) / static_cast<double>(PERMUTATIONS + 1);
+    
+    std::cout << "  Permutation test complete: " << total_count_greater_equal 
+              << "/" << PERMUTATIONS << " permutations >= observed I" << std::endl;
+    std::cout << "  Empirical mean = " << empirical_mean << ", std = " << empirical_std << std::endl;
+    
+    bool is_significant = p_value < 0.05;
+    
+    return MoransIResult(observed_i, p_value, is_significant);
 }

@@ -31,16 +31,16 @@ private:
     static constexpr int TOTAL_CHUNKS = 20;
     static constexpr int CHUNK_SIZE_BP = 250000;
     static constexpr int PERMUTATIONS = 100;
-    
+
+    // Number of genomic bins on the circle: timepoint tp maps to angle tp * 2pi / cycle_bins_
+    double cycle_bins_;
+
     // Compute circular genomic distance between two chunks
     double genomic_distance(int chunk1, int chunk2) const;
     
     // Compute genomic-based inverse distance weights
     std::vector<std::vector<double>> compute_genomic_weights(
         const std::vector<int>& genomic_positions) const;
-    
-    // Row standardize weights matrix
-    void row_standardize_weights(std::vector<std::vector<double>>& weights) const;
     
     // Compute spatial statistics per genomic chunk
     std::vector<double> compute_spatial_variable(
@@ -55,35 +55,28 @@ private:
         const std::vector<std::vector<double>>& weights,
         const std::vector<double>& standardized_variable) const;
     
-    // Structure to hold permutation test results
-    struct PermutationTestResult {
-        double p_value;
-        double empirical_mean;
-        double empirical_std;
-        size_t total_permutations;
-        
-        PermutationTestResult(double p, double mean, double std, size_t n) 
-            : p_value(p), empirical_mean(mean), empirical_std(std), total_permutations(n) {}
-    };
-    
-    // Permutation test for p-value and empirical statistics
-    PermutationTestResult calculate_permutation_test(
+    // Streams row-standardized inverse squared distance weights once and returns
+    // num_out[k] = D[:,k]^T W D[:,k] for each of the ncol columns of row-major D; returns sum of weights
+    double stream_quadratic_forms(
         const std::vector<Point3D>& spatial_coords,
-        const std::vector<int>& genomic_positions,
-        double observed_morans_i) const;
-    
+        const std::vector<double>& D,
+        size_t ncol,
+        std::vector<double>& num_out) const;
+
     // Calculate variance of Moran's I under null hypothesis
     double calculate_morans_i_variance(
         const std::vector<std::vector<double>>& weights) const;
 
 public:
-    GenomicMoransICalculator() = default;
+    explicit GenomicMoransICalculator(double cycle_bins = 20.0) : cycle_bins_(cycle_bins) {}
     ~GenomicMoransICalculator() = default;
     
-    // Main computation with p-value: genomic weights, spatial variable
+    // Main computation with p-value: genomic weights, spatial variable.
+    // A nonzero seed makes the permutation shuffles reproducible; 0 uses std::random_device.
     MoransIResult compute_genomic_morans_i_with_pvalue(
         const std::vector<Point3D>& spatial_coords,
-        const std::vector<int>& genomic_positions) const;
+        const std::vector<int>& genomic_positions,
+        unsigned long long seed = 0) const;
     
     // Legacy method (without p-value for backward compatibility)
     double compute_genomic_morans_i(const std::vector<Point3D>& spatial_coords,

@@ -24,7 +24,7 @@ struct CSVRow {
 
 class CSVReader {
 public:
-    static std::vector<CSVRow> read_csv(const std::string& filename) {
+    static std::vector<CSVRow> read_csv(const std::string& filename, int tp_start_0, int tp_end_0) {
         std::vector<CSVRow> data;
         std::ifstream file(filename);
 
@@ -69,8 +69,8 @@ public:
 
             try {
                 auto row = parse_line(line, column_indices);
-                // Include all Walk-IDs, timepoints 0-19 (exclude timepoint 20)
-                if (row.timepoint >= 0 && row.timepoint <= 19) {
+                // Include all Walk-IDs, timepoints within the requested range
+                if (row.timepoint >= tp_start_0 && row.timepoint <= tp_end_0) {
                     data.push_back(row);
                 }
             } catch (const std::exception& e) {
@@ -177,33 +177,75 @@ int main(int argc, char* argv[]) {
         // Default values
         std::string input_filename = "datasets/TestData_JA_2walks.csv";
         size_t max_sample_points = 50000; // Default 2500 points per timepoint × 20 timepoints
-        
+        int tp_start_1based = 1;   // time-point column value + 1, inclusive
+        int tp_end_1based = 20;
+
         // Parse command line arguments
         if (argc > 1 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
-            std::cout << "Usage: " << argv[0] << " [input_file] [max_sample_points]" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [input_file] [max_sample_points]"
+                      << " [--tp_start_1based N] [--tp_end_1based N]" << std::endl;
             std::cout << "  input_file: CSV file to process (default: " << input_filename << ")" << std::endl;
-            std::cout << "  max_sample_points: Maximum points per Walk-ID (default: " << max_sample_points << ")" << std::endl;
-            std::cout << "\nExample: " << argv[0] << " data.csv 10000" << std::endl;
+            std::cout << "  max_sample_points: Maximum points per Walk-ID, 0 = use all points (default: " << max_sample_points << ")" << std::endl;
+            std::cout << "  --tp_start_1based N: first time-point to keep, 1-based inclusive"
+                      << " (time-point column value + 1). Default " << tp_start_1based << std::endl;
+            std::cout << "  --tp_end_1based N: last time-point to keep, 1-based inclusive."
+                      << " Default " << tp_end_1based << std::endl;
+            std::cout << "  The genome circle has (tp_end - tp_start + 1) bins." << std::endl;
+            std::cout << "\nExample: " << argv[0] << " data.csv 10000 --tp_start_1based 3 --tp_end_1based 23" << std::endl;
             return 0;
         }
-        
-        if (argc >= 2) {
-            input_filename = argv[1];
+
+        std::vector<std::string> positional;
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--tp_start_1based" || arg == "--tp_end_1based") {
+                if (i + 1 >= argc) {
+                    std::cerr << "Error: " << arg << " requires a value." << std::endl;
+                    return 1;
+                }
+                try {
+                    int v = std::stoi(argv[++i]);
+                    if (arg == "--tp_start_1based") tp_start_1based = v;
+                    else tp_end_1based = v;
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: Invalid value for " << arg << ": '" << argv[i] << "'." << std::endl;
+                    return 1;
+                }
+            } else {
+                positional.push_back(arg);
+            }
         }
-        if (argc >= 3) {
+        if (positional.size() >= 1) {
+            input_filename = positional[0];
+        }
+        if (positional.size() >= 2) {
             try {
-                max_sample_points = std::stoul(argv[2]);
+                max_sample_points = std::stoul(positional[1]);
             } catch (const std::exception& e) {
-                std::cerr << "Error: Invalid sample size '" << argv[2] << "'. Must be a positive integer." << std::endl;
+                std::cerr << "Error: Invalid sample size '" << positional[1] << "'. Must be a positive integer." << std::endl;
                 return 1;
             }
         }
-        
+        if (tp_start_1based < 1) {
+            std::cerr << "Error: --tp_start_1based must be >= 1." << std::endl;
+            return 1;
+        }
+        if (tp_end_1based < tp_start_1based) {
+            std::cerr << "Error: --tp_end_1based must be >= --tp_start_1based." << std::endl;
+            return 1;
+        }
+        const int tp_start_0 = tp_start_1based - 1;
+        const int tp_end_0 = tp_end_1based - 1;
+        const int n_tp_in_range = tp_end_0 - tp_start_0 + 1;
+
         std::cout << "Input file: " << input_filename << std::endl;
         std::cout << "Max sample points per Walk-ID: " << max_sample_points << std::endl;
+        std::cout << "Time-point range (1-based): " << tp_start_1based << ".." << tp_end_1based
+                  << " (time-point column " << tp_start_0 << ".." << tp_end_0 << "), genome cycle bins = "
+                  << n_tp_in_range << std::endl;
         
         // Read CSV data
-        auto csv_data = CSVReader::read_csv(input_filename);
+        auto csv_data = CSVReader::read_csv(input_filename, tp_start_0, tp_end_0);
         
         // Get basename of input file for output
         std::string basename = std::filesystem::path(input_filename).stem().string();
@@ -217,7 +259,7 @@ int main(int argc, char* argv[]) {
         std::cout << "\nFound " << walk_groups.size() << " unique Walk-IDs" << std::endl;
         
         // Create genomic Moran's I calculator
-        GenomicMoransICalculator calculator;
+        GenomicMoransICalculator calculator(static_cast<double>(n_tp_in_range));
         
         // Prepare CSV output file
         std::string output_filename = basename + "_morans_i_results.csv";
@@ -248,7 +290,7 @@ int main(int argc, char* argv[]) {
             // For large datasets, use stratified sampling to maintain timepoint representation
             std::vector<size_t> sample_indices;
             
-            if (rows.size() > max_sample_points) {
+            if (max_sample_points > 0 && rows.size() > max_sample_points) {
                 std::cout << "Dataset too large, using stratified sampling of " << max_sample_points << " points..." << std::endl;
                 sample_indices = stratified_sample(rows, max_sample_points);
                 std::cout << "Selected " << sample_indices.size() << " representative points" << std::endl;
