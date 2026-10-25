@@ -7,13 +7,14 @@ from experimental data and compares them to random 20-gons.
 
 import os
 import sys
+import csv
 import argparse
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Tuple
 import warnings
 warnings.filterwarnings('ignore')
@@ -79,6 +80,16 @@ CUSTOM_20_COLORS_HEX = [
 
 from matplotlib.colors import ListedColormap
 CUSTOM_TIMEPOINT_CMAP = ListedColormap(CUSTOM_20_COLORS_HEX, name='timepoint_20')
+
+
+def timepoint_colors(n_vertices):
+    """Per-vertex colours: the 20 reference colours linearly resampled to n_vertices."""
+    if n_vertices == len(CUSTOM_20_COLORS_HEX):
+        return list(CUSTOM_20_COLORS_HEX)
+    from matplotlib.colors import LinearSegmentedColormap
+    base = LinearSegmentedColormap.from_list(
+        'timepoint_custom', CUSTOM_20_COLORS_HEX, N=max(256, n_vertices))
+    return [base(i / max(n_vertices - 1, 1)) for i in range(n_vertices)]
 
 
 def classify_name(name: str) -> str:
@@ -715,7 +726,6 @@ class KendallIsogonAverager:
 
         n_isogons, n_vertices, dim = isogons.shape
 
-        assert n_vertices == 20, f"Expected 20 vertices, got {n_vertices}"
         assert dim in [2, 3], f"Expected 2D or 3D coordinates, got {dim}D"
 
         # Convert all to preshapes
@@ -974,17 +984,18 @@ def calculate_knot_properties(curve):
         return 'Error', 0.0
 
 
-def load_and_preprocess_data(filepath):
+def load_and_preprocess_data(filepath, tp_start_0, tp_end_0):
     """
     Load and preprocess the SMLM data.
-    Returns: Dictionary with Walk-ID as keys and dataframes as values (only complete walks with all 20 time-points)
+    Returns: Dictionary with Walk-ID as keys and dataframes as values (only complete walks with all time-points in range)
     """
     print(f"Loading data from {filepath}...")
     df = pd.read_csv(filepath)
+    n_vertices = tp_end_0 - tp_start_0 + 1
 
-    # Filter for time-points 0-19 (0-indexed)
-    df = df[df['time-point'] <= 19]
-    df = df[df['time-point'] >= 0]
+    # Filter for time-points tp_start_0..tp_end_0 (0-indexed)
+    df = df[df['time-point'] <= tp_end_0]
+    df = df[df['time-point'] >= tp_start_0]
 
     # Group by Walk-ID
     walk_groups = {}
@@ -995,17 +1006,17 @@ def load_and_preprocess_data(filepath):
 
     print(f"Found {len(walk_groups)} Walk-IDs")
 
-    # Filter to only include walks with all 20 time-points
+    # Filter to only include walks with all n_vertices time-points
     complete_walks = {}
     incomplete_walks = []
     for walk_id, group in walk_groups.items():
         unique_timepoints = group['time-point'].unique()
-        if len(unique_timepoints) == 20:
+        if len(unique_timepoints) == n_vertices:
             complete_walks[walk_id] = group
         else:
             incomplete_walks.append((walk_id, len(unique_timepoints)))
 
-    print(f"Complete walks (20 time-points): {len(complete_walks)}")
+    print(f"Complete walks ({n_vertices} time-points {tp_start_0}..{tp_end_0}): {len(complete_walks)}")
     if incomplete_walks:
         print(f"Incomplete walks excluded: {len(incomplete_walks)}")
         for walk_id, n_points in incomplete_walks[:5]:  # Show first 5
@@ -1017,7 +1028,7 @@ def load_and_preprocess_data(filepath):
 
 
 def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False,
-                                no_replacement=False):
+                                no_replacement=False, timepoints=range(0, 20)):
     """
     Sample trajectories from a single Walk-ID.
     For each iteration, randomly select one point from each time-point.
@@ -1036,30 +1047,32 @@ def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False,
         When True, each localization at a given time-point is used in at
         most one sampled curve. Each TP's index pool is independently
         shuffled. Effective N is capped at min over TPs of |pool_TP|.
+    timepoints : sequence of int, default range(0, 20)
+        0-based time-point values, in connection order.
 
     Returns: List of (curve, knot_name, determinant) tuples
-             where curve is np.ndarray of shape (20, 3)
+             where curve is np.ndarray of shape (len(timepoints), 3)
     """
     results = []
 
     if no_replacement:
         tp_pools = {}
-        for tp in range(0, 20):
+        for tp in timepoints:
             tp_data = walk_data[walk_data['time-point'] == tp]
             if len(tp_data) == 0:
-                return results  # Missing TP: cannot form any 20-vertex curve
+                return results  # Missing TP: cannot form any complete curve
             tp_pools[tp] = tp_data[['x', 'y', 'z']].values
 
         min_pool = min(len(p) for p in tp_pools.values())
         effective_n = min(n_iterations, min_pool)
         # Pre-shuffle each TP's indices independently and slice to effective_n
         shuffled = {tp: np.random.permutation(len(tp_pools[tp]))[:effective_n]
-                    for tp in range(20)}
+                    for tp in timepoints}
 
         for i in range(effective_n):
-            curve = np.array([tp_pools[tp][shuffled[tp][i]] for tp in range(20)])
+            curve = np.array([tp_pools[tp][shuffled[tp][i]] for tp in timepoints])
             if randomize_order:
-                curve = curve[np.random.permutation(20)]
+                curve = curve[np.random.permutation(len(timepoints))]
             knot_name, determinant = calculate_knot_properties(curve)
             results.append((curve, knot_name, determinant))
 
@@ -1068,8 +1081,8 @@ def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False,
     for _ in range(n_iterations):
         trajectory = []
 
-        # For each time-point from 0 to 19 (0-indexed)
-        for tp in range(0, 20):
+        # For each time-point in range (0-indexed)
+        for tp in timepoints:
             tp_data = walk_data[walk_data['time-point'] == tp]
 
             if len(tp_data) == 0:
@@ -1082,11 +1095,11 @@ def sample_trajectory_from_walk(walk_data, n_iterations, randomize_order=False,
             point = [selected['x'], selected['y'], selected['z']]
             trajectory.append(point)
 
-        if trajectory is not None and len(trajectory) == 20:
+        if trajectory is not None and len(trajectory) == len(timepoints):
             # Convert to numpy array
             curve = np.array(trajectory)
             if randomize_order:
-                curve = curve[np.random.permutation(20)]
+                curve = curve[np.random.permutation(len(timepoints))]
             # Scale to nm if needed (data appears to be in nm already based on the file)
             # curve = curve * 1e-9  # Convert to meters for consistency with other code
 
@@ -1390,8 +1403,11 @@ def validate_knot_results(results, label="data"):
             # Verify types are reasonable
             if not isinstance(curve, np.ndarray):
                 return False, f"{label}: Item {i} has non-array curve: {type(curve)}"
-            if curve.shape != (20, 3):
-                return False, f"{label}: Item {i} curve has wrong shape: {curve.shape} (expected (20, 3))"
+            if i == 0:
+                # All curves must share the first curve's vertex count
+                expected_shape = (curve.shape[0], 3)
+            if curve.shape != expected_shape:
+                return False, f"{label}: Item {i} curve has wrong shape: {curve.shape} (expected {expected_shape})"
             if not isinstance(name, str):
                 return False, f"{label}: Item {i} has non-string knot name: {type(name)}"
             if not isinstance(det, (int, float, np.integer, np.floating)):
@@ -1593,11 +1609,11 @@ def create_kendall_single_panel(walk_id, walk_kendall_data, ax):
     zs = average_isogon[:, 2]
 
     # Plot vertices with custom colormap (rainbow gradient for time-points)
-    ax.scatter(xs, ys, zs, c=np.arange(20), cmap=CUSTOM_TIMEPOINT_CMAP, s=30, alpha=0.8, rasterized=True)
+    ax.scatter(xs, ys, zs, c=np.arange(len(xs)), cmap=CUSTOM_TIMEPOINT_CMAP, s=30, alpha=0.8, rasterized=True)
 
     # Plot edges
-    for i in range(20):
-        j = (i + 1) % 20
+    for i in range(len(xs)):
+        j = (i + 1) % len(xs)
         ax.plot([xs[i], xs[j]], [ys[i], ys[j]], [zs[i], zs[j]],
                'k-', alpha=0.6, linewidth=1.2)
 
@@ -1654,7 +1670,8 @@ def create_morans_info_panel(walk_id, morans_i_dict, distance, ax):
     ax.set_title('Spatial Statistics', fontsize=11, fontweight='bold', pad=10)
 
 
-def create_3d_trajectory_panel(walk_id, walk_data, morans_i_dict, centroid_knot_types, ax):
+def create_3d_trajectory_panel(walk_id, walk_data, morans_i_dict, centroid_knot_types, ax,
+                               timepoints=range(0, 20)):
     """
     Create a 3D scatter plot of raw trajectory localizations colored by time-point.
 
@@ -1664,6 +1681,7 @@ def create_3d_trajectory_panel(walk_id, walk_data, morans_i_dict, centroid_knot_
         morans_i_dict: Dictionary with Moran's I values
         centroid_knot_types: Dictionary mapping walk_id to (knot_name, determinant) tuples
         ax: Matplotlib 3D axis
+        timepoints: 0-based time-point values in range, in order
     """
     # Get Moran's I value
     if walk_id in morans_i_dict:
@@ -1683,12 +1701,13 @@ def create_3d_trajectory_panel(walk_id, walk_data, morans_i_dict, centroid_knot_
     title_text = f"Walk-ID {walk_id}: 3D Trajectory ({morans_text}, {centroid_text})"
 
     # Plot each time-point with its corresponding color
-    for tp in range(0, 20):
+    tp_colors = timepoint_colors(len(timepoints))
+    for pos, tp in enumerate(timepoints):
         tp_data = walk_data[walk_data['time-point'] == tp]
 
         if len(tp_data) > 0:
-            # Get color from custom colormap (0-indexed)
-            color = CUSTOM_20_COLORS_HEX[tp]
+            # Color by position within the time-point range
+            color = tp_colors[pos]
 
             # Plot all localizations for this time-point
             ax.scatter(tp_data['x'].values,
@@ -1697,7 +1716,7 @@ def create_3d_trajectory_panel(walk_id, walk_data, morans_i_dict, centroid_knot_
                       c=color,
                       s=20,
                       alpha=0.7,
-                      label=f'TP{tp+1}' if tp in [0, 4, 9, 14, 19] else '',  # Only label some for cleaner legend (show as 1-indexed)
+                      label=f'TP{tp+1}' if (pos == 0 or pos % 5 == 4 or pos == len(timepoints) - 1) else '',  # Only label some for cleaner legend (show as 1-indexed)
                       rasterized=True)
 
     # Set labels
@@ -1785,7 +1804,7 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
                            walk_rog_data=None, control_rog_values=None,
                            global_rog_x_range=None, global_rog_y_max=None,
                            metrics='all', puknot=False, no_stacked=False,
-                           show_centroids=False):
+                           show_centroids=False, timepoints=range(0, 20)):
     """
     Create a comprehensive report card for a single walk-id with 2×2 layout.
 
@@ -2512,7 +2531,8 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
 
     # Panel 4 (bottom-middle or bottom-right): 3D trajectory
     if walk_id in walk_groups:
-        create_3d_trajectory_panel(walk_id, walk_groups[walk_id], morans_i_dict, centroid_knot_types, ax4)
+        create_3d_trajectory_panel(walk_id, walk_groups[walk_id], morans_i_dict, centroid_knot_types, ax4,
+                                   timepoints=timepoints)
     else:
         ax4.text(0.5, 0.5, 0.5, 'No trajectory data', ha='center', va='center')
         ax4.set_title(f'Walk-ID {walk_id}: 3D Trajectory', fontsize=11, fontweight='bold')
@@ -3361,17 +3381,65 @@ def segment_and_sample_polygon(polygon_10k, n_segments=20, method='arc_length'):
         raise ValueError(f"Unknown segmentation method: {method}")
 
 
-def generate_globule_polygons(samples_per_file=5, globule_dir=None, segment_method='arc_length'):
+def load_globule_cache_csv(path):
+    """Return (dists, meta) from a globule cache CSV, or (None, None).
+
+    dists: {globule_type: [(knot_name, determinant), ...]}
+    meta:  {n_vertices, samples_per_globule, segment_by, unknotted_dir,
+            knotted_dir} taken from the file (constant across rows).
     """
-    Generate 20-gons from globule files (knotted or unknotted).
+    if not path or not os.path.exists(path):
+        return None, None
+    dists = defaultdict(list)
+    meta = {}
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            raw = (row.get('determinant') or '').strip()
+            try:
+                det = float(raw)
+            except ValueError:
+                det = float('nan')
+            dists[row['globule_type']].append((row['knot_name'], det))
+            if not meta:
+                meta = {
+                    'n_vertices': int(row['n_vertices']),
+                    'samples_per_globule': int(row['samples_per_globule']),
+                    'segment_by': row['segment_by'],
+                    'unknotted_dir': row.get('unknotted_dir', ''),
+                    'knotted_dir': row.get('knotted_dir', ''),
+                }
+    return dict(dists), meta
+
+
+def write_globule_cache_csv(path, dists, n_vertices, samples_per_globule,
+                            segment_by, unknotted_dir, knotted_dir):
+    """Write globule (knot_name, determinant) lists + settings to a cache CSV."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['globule_type', 'knot_name', 'determinant', 'n_vertices',
+                    'samples_per_globule', 'segment_by', 'unknotted_dir',
+                    'knotted_dir'])
+        for gtype, lst in dists.items():
+            for name, det in lst:
+                w.writerow([gtype, name, det, n_vertices, samples_per_globule,
+                            segment_by, unknotted_dir, knotted_dir])
+
+
+def generate_globule_polygons(samples_per_file=5, globule_dir=None, segment_method='arc_length',
+                              n_vertices=20):
+    """
+    Generate n_vertices-gons from globule files (knotted or unknotted).
 
     Args:
-        samples_per_file: number of 20-gons to generate from each 10k-gon file.
+        samples_per_file: number of n-gons to generate from each 10k-gon file.
             Forced to 1 when ``segment_method`` is deterministic
             ('systematic' or 'centroid') since repeated samples are identical.
         globule_dir: directory containing the TSV files
         segment_method: one of 'arc_length', 'point_count' / 'stride',
             'uniform', 'systematic', 'centroid'.
+        n_vertices: number of vertices per sampled polygon.
 
     Returns:
         List of (knot_name, determinant) tuples
@@ -3407,13 +3475,13 @@ def generate_globule_polygons(samples_per_file=5, globule_dir=None, segment_meth
         # Generate multiple 20-gons from this file
         for sample_idx in range(samples_per_file):
             # Sample a 20-gon preserving order with the specified method
-            polygon_20 = segment_and_sample_polygon(polygon_10k, n_segments=20, method=segment_method)
+            polygon_20 = segment_and_sample_polygon(polygon_10k, n_segments=n_vertices, method=segment_method)
 
             # Calculate knot properties
             knot_name, determinant = calculate_knot_properties(polygon_20)
             results.append((knot_name, determinant))
 
-    print(f"Generated {len(results)} 20-gons from {globule_type} globule files using {segment_method} segmentation")
+    print(f"Generated {len(results)} {n_vertices}-gons from {globule_type} globule files using {segment_method} segmentation")
     return results
 
 
@@ -3425,15 +3493,19 @@ def process_walk_parallel(args):
     -----------
     args : tuple
         (walk_id, walk_data, n_iterations),
-        (walk_id, walk_data, n_iterations, randomize_order), or
-        (walk_id, walk_data, n_iterations, randomize_order, no_replacement)
+        (walk_id, walk_data, n_iterations, randomize_order),
+        (walk_id, walk_data, n_iterations, randomize_order, no_replacement), or
+        (walk_id, walk_data, n_iterations, randomize_order, no_replacement, timepoints)
 
     Returns:
     --------
     tuple : (walk_id, results_list)
         walk_id and list of (curve, knot_name, determinant) tuples
     """
-    if len(args) == 5:
+    timepoints = range(0, 20)
+    if len(args) == 6:
+        walk_id, walk_data, n_iterations, randomize_order, no_replacement, timepoints = args
+    elif len(args) == 5:
         walk_id, walk_data, n_iterations, randomize_order, no_replacement = args
     elif len(args) == 4:
         walk_id, walk_data, n_iterations, randomize_order = args
@@ -3444,7 +3516,8 @@ def process_walk_parallel(args):
         no_replacement = False
     results = sample_trajectory_from_walk(walk_data, n_iterations,
                                           randomize_order=randomize_order,
-                                          no_replacement=no_replacement)
+                                          no_replacement=no_replacement,
+                                          timepoints=timepoints)
 
     # Validate results before returning
     is_valid, error_msg = validate_knot_results(results, f"Walk-ID {walk_id} (parallel)")
@@ -3668,11 +3741,11 @@ def create_kendall_visualizations(walk_kendall_data, output_prefix):
             zs = average_isogon[:, 2]
 
             # Plot vertices
-            ax.scatter(xs, ys, zs, c=np.arange(20), cmap='viridis', s=50, alpha=0.8, rasterized=True)
+            ax.scatter(xs, ys, zs, c=np.arange(len(xs)), cmap='viridis', s=50, alpha=0.8, rasterized=True)
 
             # Plot edges
-            for i in range(20):
-                j = (i + 1) % 20
+            for i in range(len(xs)):
+                j = (i + 1) % len(xs)
                 ax.plot([xs[i], xs[j]], [ys[i], ys[j]], [zs[i], zs[j]],
                        'k-', alpha=0.6, linewidth=1.5)
 
@@ -4021,7 +4094,7 @@ def _tidy_parabola_fig(fig):
     return fig
 
 
-def build_population_parabola_pages(walk_results, label=''):
+def build_population_parabola_pages(walk_results, label='', tp_start_1based=1, tp_end_1based=20):
     """Generate parabola + distance-matrix figures from the De Witt curve population.
 
     Returns dict:
@@ -4041,8 +4114,10 @@ def build_population_parabola_pages(walk_results, label=''):
         return out
 
     n_vertices = next(iter(pop.values())).shape[0]
-    tp_start = 1
-    tp_end = n_vertices
+    tp_start = tp_start_1based
+    tp_end = tp_end_1based
+    assert n_vertices == tp_end - tp_start + 1, \
+        f"Curve length {n_vertices} does not match TP range {tp_start}..{tp_end}"
 
     print(f"  Building population parabola/distance-matrix pages "
           f"({len(pop)} De Witt curves, {n_vertices} vertices each)...")
@@ -4157,6 +4232,21 @@ def main():
                             "Deterministic methods force samples_per_globule=1.")
     parser.add_argument('--show_random', action='store_true',
                        help='Include random polygon control when using globule controls')
+    parser.add_argument('--globule_cache_csv', type=str, default=None,
+                       help='Path to a globule-control cache CSV. The unknotted/knotted '
+                            'globule knot-type distributions depend only on the globule '
+                            'dirs, n_vertices, samples_per_globule and segmentation (NOT on '
+                            'the walk set), so they can be computed once and reused across '
+                            'datasets/ranges with the same settings. If the file exists it '
+                            'is loaded (validated against the current settings); otherwise '
+                            'the globules are computed and written to it. The random control '
+                            'is always recomputed per dataset (its hull is walk-specific).')
+    parser.add_argument('--tp_start_1based', type=int, default=1,
+                       help='Time-point range start, 1-based inclusive '
+                            '(time-point column value + 1). Default 1.')
+    parser.add_argument('--tp_end_1based', type=int, default=20,
+                       help='Time-point range end, 1-based inclusive '
+                            '(time-point column value + 1). Default 20.')
     parser.add_argument('--metrics', choices=['all', 'kl', 'wasserstein'],
                        default='all',
                        help='Which metrics to compute (default: all)')
@@ -4213,6 +4303,15 @@ def main():
     # Check mutual exclusivity
     if args.vassiliev and (args.xyCN or args.xzCN or args.yzCN):
         parser.error("--vassiliev is mutually exclusive with planar CN flags (--xyCN, --xzCN, --yzCN)")
+    if args.tp_start_1based < 1:
+        parser.error("--tp_start_1based must be >= 1")
+    if args.tp_end_1based < args.tp_start_1based:
+        parser.error("--tp_end_1based must be >= --tp_start_1based")
+
+    tp_start_0 = args.tp_start_1based - 1
+    tp_end_0 = args.tp_end_1based - 1
+    n_vertices = tp_end_0 - tp_start_0 + 1
+    timepoints = list(range(tp_start_0, tp_end_0 + 1))
 
     # Handle verbosity settings
     global WURLITZER_AVAILABLE
@@ -4225,6 +4324,8 @@ def main():
     print(f"=" * 60)
     print(f"Parameters:")
     print(f"  N (iterations per Walk-ID): {args.N}")
+    print(f"  Time-point range (1-based): {args.tp_start_1based}..{args.tp_end_1based} "
+          f"(time-point column {tp_start_0}..{tp_end_0}), n_vertices = {n_vertices}")
 
     # Print control information
     controls_to_use = []
@@ -4255,7 +4356,7 @@ def main():
     print(f"=" * 60)
 
     # Load and preprocess data
-    walk_groups = load_and_preprocess_data(args.input)
+    walk_groups = load_and_preprocess_data(args.input, tp_start_0, tp_end_0)
 
     # Sample trajectories from each Walk-ID
     print(f"\nSampling {args.N} trajectories from each Walk-ID...")
@@ -4268,7 +4369,7 @@ def main():
         print(f"Using {n_workers} parallel workers...")
 
         # Prepare arguments for parallel processing
-        parallel_args = [(walk_id, walk_data, args.N, args.randomize_order, args.no_replacement)
+        parallel_args = [(walk_id, walk_data, args.N, args.randomize_order, args.no_replacement, timepoints)
                         for walk_id, walk_data in walk_groups.items()]
 
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
@@ -4284,7 +4385,7 @@ def main():
         for walk_id, walk_data in tqdm(walk_groups.items(), desc="Processing Walk-IDs"):
             walk_results[walk_id] = sample_trajectory_from_walk(
                 walk_data, args.N, randomize_order=args.randomize_order,
-                no_replacement=args.no_replacement)
+                no_replacement=args.no_replacement, timepoints=timepoints)
 
     # Validate all walk_results after collection
     print("\nValidating walk results...")
@@ -4329,23 +4430,63 @@ def main():
     # Generate control polygons based on flags
     if use_random:
         print("\nUsing random polygon control...")
-        controls['Random'] = generate_random_polygons(args.M, convex_hull=avg_hull)
+        controls['Random'] = generate_random_polygons(args.M, n_vertices=n_vertices, convex_hull=avg_hull)
 
+    # Same rule as generate_globule_polygons, so the cache records what was actually used
+    samples_per_globule = (1 if args.segment_by in _DETERMINISTIC_SEGMENT_METHODS
+                           else args.samples_per_globule)
+
+    # Globule controls: reuse a shared cache when available (they don't depend
+    # on the walk set). Random control above stays per-dataset.
+    globule_cache, cache_meta = load_globule_cache_csv(args.globule_cache_csv)
+    if globule_cache is not None:
+        want = (n_vertices, int(samples_per_globule), args.segment_by,
+                os.path.basename(os.path.normpath(args.unknotted_globule_dir or '')),
+                os.path.basename(os.path.normpath(args.knotted_globule_dir or '')))
+        got = (cache_meta['n_vertices'], cache_meta['samples_per_globule'],
+               cache_meta['segment_by'],
+               os.path.basename(os.path.normpath(cache_meta['unknotted_dir'])),
+               os.path.basename(os.path.normpath(cache_meta['knotted_dir'])))
+        if want != got:
+            raise ValueError(
+                f'globule cache {args.globule_cache_csv} settings {got} do not '
+                f'match current {want}; use a matching cache or a fresh path.')
+        print(f'\nLoaded globule controls from cache: {args.globule_cache_csv}')
+
+    computed = {}
     if args.unknotted_globule:
-        print("\nUsing unknotted globule control...")
-        controls['Unknotted Globule'] = generate_globule_polygons(
-            samples_per_file=args.samples_per_globule,
-            globule_dir=args.unknotted_globule_dir,
-            segment_method=args.segment_by
-        )
+        if globule_cache and 'Unknotted Globule' in globule_cache:
+            controls['Unknotted Globule'] = globule_cache['Unknotted Globule']
+        else:
+            print("\nUsing unknotted globule control...")
+            controls['Unknotted Globule'] = generate_globule_polygons(
+                samples_per_file=samples_per_globule,
+                globule_dir=args.unknotted_globule_dir,
+                segment_method=args.segment_by,
+                n_vertices=n_vertices
+            )
+            computed['Unknotted Globule'] = controls['Unknotted Globule']
 
     if args.knotted_globule:
-        print("\nUsing knotted globule control...")
-        controls['Knotted Globule'] = generate_globule_polygons(
-            samples_per_file=args.samples_per_globule,
-            globule_dir=args.knotted_globule_dir,
-            segment_method=args.segment_by
-        )
+        if globule_cache and 'Knotted Globule' in globule_cache:
+            controls['Knotted Globule'] = globule_cache['Knotted Globule']
+        else:
+            print("\nUsing knotted globule control...")
+            controls['Knotted Globule'] = generate_globule_polygons(
+                samples_per_file=samples_per_globule,
+                globule_dir=args.knotted_globule_dir,
+                segment_method=args.segment_by,
+                n_vertices=n_vertices
+            )
+            computed['Knotted Globule'] = controls['Knotted Globule']
+
+    # Persist a freshly-computed cache so later runs can reuse it.
+    if args.globule_cache_csv and globule_cache is None and computed:
+        write_globule_cache_csv(
+            args.globule_cache_csv, computed, n_vertices,
+            int(samples_per_globule), args.segment_by,
+            args.unknotted_globule_dir or '', args.knotted_globule_dir or '')
+        print(f'Wrote globule cache: {args.globule_cache_csv}')
 
     # ========================================================================
     # ACN, Kendall, and Moran's I Analysis
@@ -4409,7 +4550,7 @@ def main():
                 centroid_v2, _ = compute_v2_invariant(
                     centroid_curve,
                     closed=True,
-                    n_resample=20,
+                    n_resample=n_vertices,
                     n_projections=args.num_vassiliev_proj,
                     show_progress=False
                 )
@@ -4451,7 +4592,7 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control ACN/Writhe"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_acn, control_writhe, control_rms_writhe = average_crossing_number(control_curve, args.n_acn_projections)
                     control_acn_values.append(control_acn)
                     control_writhe_values.append(control_writhe)
@@ -4712,7 +4853,7 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control RoG"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_rog = radius_of_gyration(control_curve)
                     control_rog_values.append(control_rog)
                 except Exception as e:
@@ -4813,11 +4954,11 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control V2"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_v2, _ = compute_v2_invariant(
                         control_curve,
                         closed=True,
-                        n_resample=20,
+                        n_resample=n_vertices,
                         n_projections=args.num_vassiliev_proj,
                         show_progress=False
                     )
@@ -4853,7 +4994,7 @@ def main():
                         compute_v2_invariant,
                         curve,
                         closed=True,
-                        n_resample=20,
+                        n_resample=n_vertices,
                         n_projections=args.num_vassiliev_proj,
                         show_progress=False
                     )
@@ -4875,7 +5016,7 @@ def main():
                     v2_value, _ = compute_v2_invariant(
                         curve,
                         closed=True,
-                        n_resample=20,
+                        n_resample=n_vertices,
                         n_projections=args.num_vassiliev_proj,
                         show_progress=False
                     )
@@ -4950,7 +5091,7 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control xyCN"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_xycn = xy_crossing_number(control_curve)
                     if not np.isnan(control_xycn):
                         control_xycn_values.append(control_xycn)
@@ -5054,7 +5195,7 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control xzCN"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_xzcn = xz_crossing_number(control_curve)
                     if not np.isnan(control_xzcn):
                         control_xzcn_values.append(control_xzcn)
@@ -5158,7 +5299,7 @@ def main():
         if avg_hull is not None:
             for i in tqdm(range(n_control_samples), desc="  Control yzCN"):
                 try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, 20)
+                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
                     control_yzcn = yz_crossing_number(control_curve)
                     if not np.isnan(control_yzcn):
                         control_yzcn_values.append(control_yzcn)
@@ -5888,7 +6029,9 @@ def main():
         traceback.print_exc()
 
     # Population-level parabola + distance-matrix pages (De Witt curves)
-    parabola_bundle = build_population_parabola_pages(walk_results, label=args.label)
+    parabola_bundle = build_population_parabola_pages(walk_results, label=args.label,
+                                                      tp_start_1based=args.tp_start_1based,
+                                                      tp_end_1based=args.tp_end_1based)
     for fig in parabola_bundle['main_pages']:
         all_figures.append(fig)
 
@@ -5951,7 +6094,8 @@ def main():
                 global_rog_y_max=global_rog_y_max if args.rog else 1,
                 puknot=args.puknot,
                 no_stacked=args.no_stacked_barplots,
-                show_centroids=args.show_centroids
+                show_centroids=args.show_centroids,
+                timepoints=timepoints
             )
             all_figures.append(fig)
         except Exception as e:
