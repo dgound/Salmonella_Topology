@@ -23,9 +23,6 @@ warnings.filterwarnings('ignore')
 from KnotoID import KnotoID
 import knoodle
 
-# Vassiliev V2 invariant
-from vassiliev_v2_projection import compute_v2_invariant
-
 # Per-walk cloud Moran's I (C++ backend with NumPy fallback)
 import morans_i_cloud
 
@@ -1793,8 +1790,6 @@ def create_puknot_panel(walk_id, walk_results, centroid_knot_types, ax):
 def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk_kendall_data,
                            morans_i_dict, walk_tp1_tp21_distances, control_acn_values,
                            global_x_range, global_y_max, walk_groups, centroid_knot_types,
-                           walk_v2_data=None, control_v2_values=None,
-                           global_v2_x_range=None, global_v2_y_max=None,
                            walk_xycn_data=None, control_xycn_values=None,
                            global_xycn_x_range=None, global_xycn_y_max=None,
                            walk_xzcn_data=None, control_xzcn_values=None,
@@ -1824,10 +1819,6 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
         global_y_max: Maximum y value for ACN y-axis
         walk_groups: Dictionary of raw DataFrames per walk-id (for 3D trajectory plot)
         centroid_knot_types: Dictionary mapping walk_id to (knot_name, determinant) tuples
-        walk_v2_data: Dictionary of V2 data per walk (optional)
-        control_v2_values: List of V2 values for control (optional)
-        global_v2_x_range: Tuple (min, max) for V2 x-axis range (optional)
-        global_v2_y_max: Maximum y value for V2 y-axis (optional)
         walk_xycn_data: Dictionary of xyCN data per walk (optional)
         control_xycn_values: List of xyCN values for control (optional)
         global_xycn_x_range: Tuple (min, max) for xyCN x-axis range (optional)
@@ -1872,10 +1863,7 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
                                    metrics=metrics, show_legend=True,
                                    no_stacked=no_stacked)
 
-    # Panel 2 (top-right): Split horizontally for ACN (top) and V2/planar CNs (bottom)
-    # Check if V2 data is available
-    has_v2 = (walk_v2_data is not None and walk_id in walk_v2_data and
-              control_v2_values is not None and len(control_v2_values) > 0)
+    # Panel 2 (top-right): Split horizontally for ACN (top) and planar CNs (bottom)
     # Check if any planar CN data is available
     has_xycn = (walk_xycn_data is not None and walk_id in walk_xycn_data and
                 control_xycn_values is not None and len(control_xycn_values) > 0)
@@ -1889,8 +1877,8 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
 
     # Calculate number of rows needed for Panel 2
     n_rows = 1  # ACN always present
-    if has_v2 or has_planar_cn:
-        n_rows += 1  # V2 or planar CNs
+    if has_planar_cn:
+        n_rows += 1  # planar CNs
     n_rows += 1  # RMS Writhe always present when ACN is enabled
     if has_rog:
         n_rows += 1  # RoG
@@ -1913,9 +1901,9 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
     ax2_acn_legend.axis('off')
     row_idx += 1
 
-    if has_v2 or has_planar_cn:
-        ax2_second = fig.add_subplot(gs_panel2[row_idx, 1])  # V2 or planar CNs
-        ax2_second_legend = fig.add_subplot(gs_panel2[row_idx, 2])  # V2/planar legend
+    if has_planar_cn:
+        ax2_second = fig.add_subplot(gs_panel2[row_idx, 1])  # planar CNs
+        ax2_second_legend = fig.add_subplot(gs_panel2[row_idx, 2])  # planar legend
         ax2_second_legend.axis('off')
         row_idx += 1
     else:
@@ -2057,121 +2045,8 @@ def create_walk_report_card(walk_id, walk_results, controls, walk_acn_data, walk
         ax2_acn.text(0.5, 0.5, 'No ACN data', ha='center', va='center', transform=ax2_acn.transAxes)
         ax2_acn.set_title(f'Walk-ID {walk_id}: Distributions', fontweight='bold', fontsize=11)
 
-    # Plot V2 distribution (if ax2_second exists and has_v2)
-    if ax2_second is not None and has_v2 and walk_id in walk_v2_data:
-        # Get data
-        sampled_v2 = walk_v2_data[walk_id]['sampled_v2']
-        centroid_v2 = walk_v2_data[walk_id]['centroid_v2']
-
-        # Remove NaN values
-        sampled_v2_clean = [x for x in sampled_v2 if not np.isnan(x)]
-        control_v2_clean = [x for x in control_v2_values if not np.isnan(x)]
-
-        # Convert global_v2_x_range tuple to linspace for KDE
-        if isinstance(global_v2_x_range, tuple):
-            v2_x_range = np.linspace(global_v2_x_range[0], global_v2_x_range[1], 200)
-        else:
-            v2_x_range = global_v2_x_range
-
-        # Define colors using seaborn palette (same as ACN)
-        colors = sns.color_palette("deep")
-        raw_color = colors[0]  # blue
-        control_color = colors[7]  # gray
-        centroid_color = colors[3]  # red
-
-        # Compute kernel density estimates
-        if len(sampled_v2_clean) > 1:
-            kde_raw = gaussian_kde(sampled_v2_clean)
-            density_raw = kde_raw(v2_x_range)
-            ax2_second.fill_between(v2_x_range, density_raw, alpha=0.6, color=raw_color, label='Raw')
-            ax2_second.plot(v2_x_range, density_raw, color=raw_color, linewidth=2, alpha=0.8)
-
-        if len(control_v2_clean) > 1:
-            kde_control = gaussian_kde(control_v2_clean)
-            density_control = kde_control(v2_x_range)
-            ax2_second.fill_between(v2_x_range, density_control, alpha=0.4, color=control_color, label='Random Control')
-            ax2_second.plot(v2_x_range, density_control, color=control_color, linewidth=2, alpha=0.8)
-
-        # Add statistics
-        if len(sampled_v2_clean) > 0:
-            bio_mean = np.mean(sampled_v2_clean)
-            bio_std = np.std(sampled_v2_clean)
-        else:
-            bio_mean = np.nan
-            bio_std = np.nan
-
-        if len(control_v2_clean) > 0:
-            ctrl_mean = np.mean(control_v2_clean)
-            ctrl_std = np.std(control_v2_clean)
-        else:
-            ctrl_mean = np.nan
-            ctrl_std = np.nan
-
-        # Add mean lines
-        if not np.isnan(bio_mean):
-            ax2_second.axvline(bio_mean, color=raw_color, linestyle='--', linewidth=2.5, alpha=0.8)
-        if not np.isnan(ctrl_mean):
-            ax2_second.axvline(ctrl_mean, color=control_color, linestyle='--', linewidth=2.5, alpha=0.8)
-
-        # Add centroid V2 line if available
-        if centroid_v2 is not None and not np.isnan(centroid_v2):
-            ax2_second.axvline(centroid_v2, color=centroid_color, linestyle='-', linewidth=3,
-                       alpha=0.9, label=f'Centroid: {centroid_v2:.6f}')
-
-        # Formatting
-        ax2_second.set_xlabel('Vassiliev V2 Invariant', fontsize=10, fontweight='bold')
-        # y-axis label removed - using shared label on left side
-        # No title for V2 plot - title is on ACN plot above
-
-        # Set limits
-        try:
-            if hasattr(global_v2_x_range, '__len__') and len(global_v2_x_range) == 2:
-                x_min = float(global_v2_x_range[0])
-                x_max = float(global_v2_x_range[1])
-            else:
-                x_min, x_max = 0, 1
-            ax2_second.set_xlim(x_min, x_max)
-        except Exception as e:
-            print(f"Warning: Could not set V2 xlim for Walk-ID {walk_id}: {e}")
-            ax2_second.set_xlim(0, 1)  # Safe default
-
-        if global_v2_y_max is not None:
-            try:
-                ax2_second.set_ylim(0, float(global_v2_y_max))
-            except:
-                ax2_second.set_ylim(0, 1)  # Safe default
-
-        # Add text box with statistics
-        stats_text = ''
-        if not np.isnan(bio_mean):
-            stats_text += f'Raw: μ={bio_mean:.6f}, σ={bio_std:.6f}\n'
-        if not np.isnan(ctrl_mean):
-            stats_text += f'Control: μ={ctrl_mean:.6f}, σ={ctrl_std:.6f}'
-        if centroid_v2 is not None and not np.isnan(centroid_v2):
-            stats_text += f'\nCentroid: {centroid_v2:.6f}'
-
-        if stats_text:
-            props = dict(boxstyle='round,pad=0.4', facecolor='white', alpha=0.8, edgecolor='gray')
-            ax2_second.text(0.97, 0.97, stats_text, transform=ax2_second.transAxes,
-                    fontsize=8, verticalalignment='top', horizontalalignment='right', bbox=props)
-
-        # Improve grid
-        ax2_second.grid(True, alpha=0.2, linestyle='-', linewidth=0.5)
-        ax2_second.set_axisbelow(True)
-
-        # Add subtle spines
-        for spine in ax2_second.spines.values():
-            spine.set_linewidth(0.5)
-            spine.set_alpha(0.5)
-
-        # Add legend to the right side
-        handles, labels = ax2_second.get_legend_handles_labels()
-        if handles and ax2_second_legend is not None:
-            ax2_second_legend.legend(handles, labels, loc='center left', fontsize=7,
-                                     frameon=True, fancybox=True)
-
     # Plot combined planar CN distribution (if ax2_second exists and has_planar_cn)
-    elif ax2_second is not None and has_planar_cn:
+    if ax2_second is not None and has_planar_cn:
         # Use unified x-range for all projections
         if isinstance(unified_planar_cn_x_range, tuple):
             cn_x_range = np.linspace(unified_planar_cn_x_range[0], unified_planar_cn_x_range[1], 200)
@@ -4263,16 +4138,12 @@ def main():
                        help='Maximum Kendall iterations (default: 100)')
     parser.add_argument('--kendall_tol', type=float, default=1e-6,
                        help='Kendall convergence tolerance (default: 1e-6)')
-    parser.add_argument('--vassiliev', action='store_true',
-                       help='Enable Vassiliev V2 invariant computation')
-    parser.add_argument('--num_vassiliev_proj', type=int, default=100,
-                       help='Number of projections for V2 computation (default: 100)')
     parser.add_argument('--xyCN', action='store_true',
-                       help='Enable xy-plane crossing number computation (mutually exclusive with --vassiliev)')
+                       help='Enable xy-plane crossing number computation')
     parser.add_argument('--xzCN', action='store_true',
-                       help='Enable xz-plane crossing number computation (mutually exclusive with --vassiliev)')
+                       help='Enable xz-plane crossing number computation')
     parser.add_argument('--yzCN', action='store_true',
-                       help='Enable yz-plane crossing number computation (mutually exclusive with --vassiliev)')
+                       help='Enable yz-plane crossing number computation')
     parser.add_argument('--rog', action='store_true',
                        help='Enable Radius of Gyration computation')
     parser.add_argument('--puknot', action='store_true',
@@ -4315,9 +4186,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Check mutual exclusivity
-    if args.vassiliev and (args.xyCN or args.xzCN or args.yzCN):
-        parser.error("--vassiliev is mutually exclusive with planar CN flags (--xyCN, --xzCN, --yzCN)")
     if args.tp_start_1based < 1:
         parser.error("--tp_start_1based must be >= 1")
     if args.tp_end_1based < args.tp_start_1based:
@@ -4515,7 +4383,6 @@ def main():
 
     walk_acn_data = {}
     walk_kendall_data = {}
-    walk_v2_data = {}
     walk_xycn_data = {}
     walk_xzcn_data = {}
     walk_yzcn_data = {}
@@ -4544,8 +4411,8 @@ def main():
         morans_i_cloud.write_morans_results_csv(morans_rows, morans_out)
         print(f"Wrote Moran's I results: {morans_out}")
 
-    # Compute weighted centroids, ACN, Kendall, and V2 analysis
-    if args.acn or args.kendall or args.vassiliev or args.puknot:
+    # Compute weighted centroids, ACN, and Kendall analysis
+    if args.acn or args.kendall or args.puknot:
         print("\nComputing weighted centroids for all walks...")
 
         for walk_id in tqdm(walk_results.keys(), desc="Computing centroids"):
@@ -4577,23 +4444,6 @@ def main():
             except Exception as e:
                 print(f"  Error analyzing centroid for Walk-ID {walk_id}: {e}")
                 centroid_knot_types[walk_id] = ('Unknown', 0.0)
-
-    # Compute V2 for centroid curves
-    if args.vassiliev and walk_centroid_data:
-        print(f"\nComputing V2 invariant for centroid curves (n_projections={args.num_vassiliev_proj})...")
-        for walk_id, centroid_curve in tqdm(walk_centroid_data.items(), desc="Centroid V2"):
-            try:
-                centroid_v2, _ = compute_v2_invariant(
-                    centroid_curve,
-                    closed=True,
-                    n_resample=n_vertices,
-                    n_projections=args.num_vassiliev_proj,
-                    show_progress=False
-                )
-                walk_v2_data[walk_id] = {'centroid_v2': centroid_v2, 'sampled_v2': []}
-            except Exception as e:
-                print(f"  Error computing centroid V2 for Walk-ID {walk_id}: {e}")
-                walk_v2_data[walk_id] = {'centroid_v2': np.nan, 'sampled_v2': []}
 
     # Skip TP1→TP21 distance computation (not used in plots, dataset-specific)
     walk_tp1_tp21_distances = {}
@@ -4974,143 +4824,6 @@ def main():
             print(f"  Global RoG y-max: {global_rog_y_max:.4f}")
         else:
             print("  Warning: No valid RoG values found for global range computation")
-
-    # V2 Invariant Computation
-    control_v2_values = []  # Initialize empty list
-    global_v2_x_range = None
-    global_v2_y_max = None
-
-    if args.vassiliev:
-        print(f"\nComputing Vassiliev V2 invariant with {args.num_vassiliev_proj} projections...")
-
-        # STEP 1: Compute SHARED control V2 distribution FIRST
-        print("  Computing SHARED control V2 distribution for all walks...")
-        n_control_samples = 200  # Use more samples for robust control
-
-        if avg_hull is not None:
-            for i in tqdm(range(n_control_samples), desc="  Control V2"):
-                try:
-                    control_curve = generate_random_polygon_in_hull(avg_hull, n_vertices)
-                    control_v2, _ = compute_v2_invariant(
-                        control_curve,
-                        closed=True,
-                        n_resample=n_vertices,
-                        n_projections=args.num_vassiliev_proj,
-                        show_progress=False
-                    )
-                    control_v2_values.append(control_v2)
-                except Exception as e:
-                    pass
-
-        control_v2_mean = np.mean(control_v2_values) if control_v2_values else 0.0
-        control_v2_std = np.std(control_v2_values) if control_v2_values else 1.0
-        print(f"  Control V2: {control_v2_mean:.6f} ± {control_v2_std:.6f} (N={len(control_v2_values)})")
-
-        # STEP 2: Compute V2 for sampled curves
-        print(f"  Computing V2 for sampled curves (N={args.N} per walk)...")
-
-        # Collect all curves directly from walk_results (no need to resample!)
-        all_curves_with_metadata = []
-        for walk_id, walk_data_results in walk_results.items():
-            for curve, knot_name, determinant in walk_data_results:
-                all_curves_with_metadata.append((walk_id, curve))
-
-        print(f"  Total curves to process: {len(all_curves_with_metadata)}")
-
-        # Compute V2 in parallel if possible
-        if args.parallel and len(all_curves_with_metadata) > 0:
-            n_workers = args.workers if args.workers else multiprocessing.cpu_count()
-            print(f"  Using {n_workers} parallel workers...")
-
-            with ProcessPoolExecutor(max_workers=n_workers) as executor:
-                # Submit all tasks and map future -> walk_id
-                future_to_walk = {}
-                for walk_id, curve in all_curves_with_metadata:
-                    future = executor.submit(
-                        compute_v2_invariant,
-                        curve,
-                        closed=True,
-                        n_resample=n_vertices,
-                        n_projections=args.num_vassiliev_proj,
-                        show_progress=False
-                    )
-                    future_to_walk[future] = walk_id
-
-                # Process results as they complete (prevents queue buildup and deadlock)
-                for future in tqdm(as_completed(future_to_walk), total=len(future_to_walk), desc="  V2 computation"):
-                    walk_id = future_to_walk[future]
-                    try:
-                        v2_value, _ = future.result()
-                        if walk_id in walk_v2_data:
-                            walk_v2_data[walk_id]['sampled_v2'].append(v2_value)
-                    except Exception as e:
-                        print(f"    Error computing V2 for Walk-ID {walk_id}: {e}")
-        else:
-            # Sequential processing
-            for walk_id, curve in tqdm(all_curves_with_metadata, desc="  V2 computation"):
-                try:
-                    v2_value, _ = compute_v2_invariant(
-                        curve,
-                        closed=True,
-                        n_resample=n_vertices,
-                        n_projections=args.num_vassiliev_proj,
-                        show_progress=False
-                    )
-                    if walk_id in walk_v2_data:
-                        walk_v2_data[walk_id]['sampled_v2'].append(v2_value)
-                except Exception as e:
-                    print(f"    Error computing V2 for Walk-ID {walk_id}: {e}")
-
-        # STEP 3: Calculate global x-range and y-max for consistent axes
-        print("  Calculating global V2 axis ranges for consistent plotting...")
-
-        # Collect all V2 values
-        all_v2_values = []
-        all_v2_values.extend(control_v2_values)
-
-        for walk_id, data in walk_v2_data.items():
-            if not np.isnan(data['centroid_v2']):
-                all_v2_values.append(data['centroid_v2'])
-            all_v2_values.extend([x for x in data['sampled_v2'] if not np.isnan(x)])
-
-        if len(all_v2_values) > 0:
-            # Calculate global x-range
-            min_v2 = np.min(all_v2_values)
-            max_v2 = np.max(all_v2_values)
-            padding = 0.1 * (max_v2 - min_v2)
-
-            # Create tuple for histogram/xlim
-            global_v2_x_range = (min_v2 - padding, max_v2 + padding)
-
-            # Create linspace for KDE density calculations
-            v2_linspace = np.linspace(min_v2 - padding, max_v2 + padding, 200)
-
-            # Calculate global y-max by finding maximum density across all distributions
-            max_density = 0.0
-
-            # Check control density
-            if len(control_v2_values) > 1:
-                kde_control = gaussian_kde(control_v2_values)
-                density_control = kde_control(v2_linspace)
-                max_density = max(max_density, np.max(density_control))
-
-            # Check each walk density
-            for walk_id, data in walk_v2_data.items():
-                sampled_v2_clean = [x for x in data['sampled_v2'] if not np.isnan(x)]
-                if len(sampled_v2_clean) > 1:
-                    kde_walk = gaussian_kde(sampled_v2_clean)
-                    density_walk = kde_walk(v2_linspace)
-                    max_density = max(max_density, np.max(density_walk))
-
-            # Add 10% padding to y-max
-            global_v2_y_max = max_density * 1.1
-
-            print(f"  Global V2 range: [{min_v2:.6f}, {max_v2:.6f}]")
-            print(f"  Global V2 x_range tuple: {global_v2_x_range}")
-            print(f"  Control mean: {control_v2_mean:.6f} ± {control_v2_std:.6f}")
-            print(f"  Global V2 y-max: {global_v2_y_max:.4f}")
-        else:
-            print("  Warning: No valid V2 values found for global range computation")
 
     # xyCN (xy-plane Crossing Number) Computation
     control_xycn_values = []  # Initialize empty list
@@ -5754,42 +5467,6 @@ def main():
             row_data['RoG_max'] = np.nan
             row_data['RoG_zscore_vs_control'] = np.nan
 
-        # Add V2 data (only if --vassiliev is enabled)
-        if args.vassiliev:
-            if walk_id in walk_v2_data:
-                v2_data = walk_v2_data[walk_id]
-                row_data['V2_centroid'] = v2_data['centroid_v2']
-
-                sampled_v2_clean = [x for x in v2_data['sampled_v2'] if not np.isnan(x)]
-                if len(sampled_v2_clean) > 0:
-                    row_data['V2_mean'] = np.mean(sampled_v2_clean)
-                    row_data['V2_std'] = np.std(sampled_v2_clean)
-                    row_data['V2_median'] = np.median(sampled_v2_clean)
-                    row_data['V2_min'] = np.min(sampled_v2_clean)
-                    row_data['V2_max'] = np.max(sampled_v2_clean)
-
-                    # Z-score relative to control
-                    if control_v2_std > 0:
-                        z_score = (row_data['V2_mean'] - control_v2_mean) / control_v2_std
-                        row_data['V2_zscore_vs_control'] = z_score
-                    else:
-                        row_data['V2_zscore_vs_control'] = np.nan
-                else:
-                    row_data['V2_mean'] = np.nan
-                    row_data['V2_std'] = np.nan
-                    row_data['V2_median'] = np.nan
-                    row_data['V2_min'] = np.nan
-                    row_data['V2_max'] = np.nan
-                    row_data['V2_zscore_vs_control'] = np.nan
-            else:
-                row_data['V2_centroid'] = np.nan
-                row_data['V2_mean'] = np.nan
-                row_data['V2_std'] = np.nan
-                row_data['V2_median'] = np.nan
-                row_data['V2_min'] = np.nan
-                row_data['V2_max'] = np.nan
-                row_data['V2_zscore_vs_control'] = np.nan
-
         # Add xyCN data
         if walk_id in walk_xycn_data:
             xycn_data = walk_xycn_data[walk_id]
@@ -6102,10 +5779,6 @@ def main():
                 global_y_max=global_y_max if args.acn else 1,
                 walk_groups=walk_groups,
                 centroid_knot_types=centroid_knot_types if (args.kendall or args.puknot) else {},
-                walk_v2_data=walk_v2_data if args.vassiliev else {},
-                control_v2_values=control_v2_values if args.vassiliev else [],
-                global_v2_x_range=global_v2_x_range if args.vassiliev else (0, 1),
-                global_v2_y_max=global_v2_y_max if args.vassiliev else 1,
                 walk_xycn_data=walk_xycn_data if args.xyCN else {},
                 control_xycn_values=control_xycn_values if args.xyCN else [],
                 global_xycn_x_range=global_xycn_x_range if args.xyCN else (0, 10),

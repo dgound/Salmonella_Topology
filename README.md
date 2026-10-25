@@ -125,7 +125,6 @@ number of timepoints in the range is the polygon's vertex count everywhere
 | `--acn` / `--n_acn_projections N` | average crossing number and writhe (1000 projections) |
 | `--rog` | radius of gyration |
 | `--kendall` | Kendall shape-space analysis |
-| `--vassiliev` / `--num_vassiliev_proj N` | Vassiliev V2 invariant |
 | `--xyCN` / `--xzCN` / `--yzCN` | per-plane crossing numbers |
 | `--tp_start_1based` / `--tp_end_1based` (default 1, 20) | analysed timepoint range, 1-based inclusive |
 | `--unknotted_globule` / `--knotted_globule` (+ `_dir`) | use simulated globule downsamples as controls |
@@ -420,8 +419,6 @@ scientific Python stack plus two knot-analysis libraries.
 - `ot` (POT, Python Optimal Transport) - Wasserstein / EMD distances.
 - `networkx` - used by the jiggle control.
 - `natsort` - used by the jiggle three-panel plot.
-- `vassiliev_v2_projection` - custom module for the V2 invariant (external,
-  imported by the SMLM main script).
 
 **C/C++ (Moran's I backends):** a C++17 compiler (`c++`, `g++` or `clang++`;
 on macOS `xcode-select --install`, in conda `conda install -c conda-forge
@@ -497,9 +494,9 @@ python Classifier_analysis/salmonella_quadrant_plot.py quadrant_stats_samples.pa
   `--input`/`--output` paths.
 - **Upstream stage.** The widefield path consumes the output of
   `drift_correct.py`, an upstream drift-correction and filtering step.
-- **External libraries not vendored.** `knoodle`, `KnotoID`, and
-  `vassiliev_v2_projection` must be installed/available separately; classification
-  and the V2 invariant are skipped or error out without them.
+- **External libraries not vendored.** `knoodle` and `KnotoID` must be
+  installed/available separately; classification is skipped or errors out
+  without them.
 - **Timepoint conventions.** All tools now take 1-based inclusive
   `--tp_start_1based` / `--tp_end_1based`; the SMLM `time-point` column is
   0-based, so flag value = column value + 1. The SMLM default range (1-20)
