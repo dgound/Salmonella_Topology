@@ -26,6 +26,9 @@ import knoodle
 # Vassiliev V2 invariant
 from vassiliev_v2_projection import compute_v2_invariant
 
+# Per-walk cloud Moran's I (C++ backend with NumPy fallback)
+import morans_i_cloud
+
 # Import wurlitzer to suppress C++ output from KnotoID
 try:
     from wurlitzer import pipes
@@ -4294,9 +4297,21 @@ def main():
                             'the first-page knot-distribution barplot, and draws solid red '
                             'centroid lines on the per-walk ACN and RMS-Writhe distribution '
                             'panels of every report card.')
-    parser.add_argument('--morans_i_file', type=str,
-                       default='../Knot_analysis_pipeline/BiggieExp3_09182025_97walks_morans_i_results.csv',
-                       help="Path to Moran's I CSV file")
+    parser.add_argument('--morans_cache_csv', type=str, default=None,
+                       help="Use this precomputed per-walk Moran's I CSV instead of computing")
+    parser.add_argument('--morans_i_file', type=str, default=None,
+                       help="DEPRECATED alias for --morans_cache_csv")
+    parser.add_argument('--skip_morans', action='store_true',
+                       help="Skip Moran's I entirely")
+    parser.add_argument('--morans_max_points', type=int, default=50000,
+                       help="Stratified-subsample walks with more localizations than this "
+                            "for Moran's I. 0 = no subsampling (use every localization) "
+                            "(default: 50000)")
+    parser.add_argument('--morans_seed', type=int, default=None,
+                       help="Seed for Moran's I subsampling and permutations (default: random)")
+    parser.add_argument('--morans_cpp_dir', type=str, default=None,
+                       help="Directory with the Moran's I C++ sources "
+                            "(default: ./Morans_I or ../morans_i_cpp)")
 
     args = parser.parse_args()
 
@@ -4349,6 +4364,12 @@ def main():
     print(f"  Input file: {args.input}")
     print(f"  Output prefix: {args.output}")
     print(f"  Parallel processing: {args.parallel}")
+    if args.morans_cache_csv or args.morans_i_file:
+        print(f"  Moran's I: load from {args.morans_cache_csv or args.morans_i_file}")
+    elif args.skip_morans:
+        print(f"  Moran's I: skipped")
+    else:
+        print(f"  Moran's I: compute (max points {args.morans_max_points or 'uncapped'}, seed {args.morans_seed})")
     if WURLITZER_AVAILABLE:
         print(f"  KnotoID output: Suppressed (use --verbose to show)")
     else:
@@ -4501,12 +4522,27 @@ def main():
     walk_centroid_data = {}
     morans_i_dict = {}
 
-    # Load Moran's I data if available
-    if os.path.exists(args.morans_i_file):
-        print(f"\nLoading Moran's I data from {args.morans_i_file}...")
-        morans_i_dict = load_morans_i_data(args.morans_i_file)
+    # Moran's I: computed by default, optional cache override
+    cache_path = args.morans_cache_csv or args.morans_i_file
+    if cache_path and args.morans_i_file and not args.morans_cache_csv:
+        print("Note: --morans_i_file is deprecated; prefer --morans_cache_csv (same semantics).")
+    if cache_path and not os.path.exists(cache_path):
+        print(f"\nWarning: Moran's I cache not found: {cache_path}; computing instead.")
+        cache_path = None
+    if cache_path:
+        print(f"\nLoading Moran's I data from {cache_path}...")
+        morans_i_dict = load_morans_i_data(cache_path)
+    elif args.skip_morans:
+        print("\nSkipping Moran's I computation (--skip_morans).")
     else:
-        print(f"\nMoran's I file not found: {args.morans_i_file}")
+        print(f"\nComputing Moran's I per walk (cycle_bins={n_vertices}, "
+              f"max_points={args.morans_max_points or 'uncapped'}, seed={args.morans_seed})...")
+        morans_rows, morans_i_dict = morans_i_cloud.compute_for_walks(
+            walk_groups, timepoints, args.morans_max_points, args.morans_seed, 'auto',
+            args.morans_cpp_dir, filename=args.input)
+        morans_out = f"{args.output}_morans_i_results.csv"
+        morans_i_cloud.write_morans_results_csv(morans_rows, morans_out)
+        print(f"Wrote Moran's I results: {morans_out}")
 
     # Compute weighted centroids, ACN, Kendall, and V2 analysis
     if args.acn or args.kendall or args.vassiliev or args.puknot:
