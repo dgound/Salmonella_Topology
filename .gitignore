@@ -7,3 +7,4 @@ __pycache__/
 # Compiled Moran's I tool
 Super_resolution_analysis/Morans_I/*.o
 Super_resolution_analysis/Morans_I/morans_i_genomic
+Widefield_analysis/morans_i_c.so

@@ -48,11 +48,19 @@ from scipy.spatial.distance import pdist, squareform
 EPSILON = 1e-10
 
 # ---------------------------------------------------------------------------
-# Try to load the compiled C backend (morans_i_c.so next to this file).
+# Compiled C backend (morans_i_c.so next to this file). Built on the fly from
+# morans_i_c.c when missing or stale; falls back to the NumPy path otherwise.
 # ---------------------------------------------------------------------------
 _C_LIB = None
-_so_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'morans_i_c.so')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_c_src = os.path.join(_HERE, 'morans_i_c.c')
+_so_path = os.path.join(_HERE, 'morans_i_c.so')
+if os.path.exists(_c_src) and (not os.path.exists(_so_path)
+                               or os.path.getmtime(_c_src) > os.path.getmtime(_so_path)):
+    print("Compiling Moran's I C backend (morans_i_c.c)...")
+    if os.system(f'cc -O2 -shared -fPIC -o "{_so_path}" "{_c_src}" -lm') != 0:
+        print(f"  WARNING: failed to compile {_c_src}. "
+              "Ensure a C compiler (cc) is on PATH or prebuild morans_i_c.so.")
 try:
     _C_LIB = ctypes.CDLL(_so_path)
     _C_LIB.morans_i_permtest.restype = None
@@ -80,6 +88,7 @@ try:
     ]
 except OSError:
     _C_LIB = None
+    print("WARNING: morans_i_c.so not available; using the slower NumPy Moran's I.")
 
 
 def _circular_chain_offset_matrix(N):
