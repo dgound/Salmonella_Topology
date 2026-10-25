@@ -46,17 +46,20 @@ per-path `utility/` converters.
 Salmonella_Topology/
 ├── Super_resolution_analysis/          # MAIN PATH 1 (SMLM)
 │   ├── comprehensive_report_cards.py   #   main pipeline: knot distributions + metrics + report cards
-│   ├── Morans_I/                       #   C++ genomic Moran's I tool (spatial-genomic autocorrelation)
-│   │   ├── main_genomic.cpp
-│   │   ├── morans_i_genomic.{cpp,h}
-│   │   └── Makefile
+│   ├── morans_i_cloud.py              #   imported module: cloud Moran's I (builds the C++ backend on first use)
+│   ├── Morans_I/                       #   C++ genomic Moran's I calculator + standalone CLI
+│   │   ├── main_genomic.cpp            #     CLI driver (CSV reading, subsampling)
+│   │   ├── morans_i_genomic.{cpp,h}    #     calculator (streaming kernel)
+│   │   ├── morans_i_genomic_api.cpp    #     extern "C" entry point used by morans_i_cloud.py
+│   │   └── Makefile                    #     builds the CLI only
 │   └── utility/
 │       └── convert_widefield_to_smlm.py# convert widefield centroid CSV into SMLM schema
 │
 ├── Widefield_analysis/                 # MAIN PATH 2 (widefield, single curve per walk)
 │   ├── report_cards_single_curve.py    #   main pipeline (CLI)
 │   ├── qc_post_filter.py              #   imported module: distance matrices + parabola fits
-│   └── morans_i.py                    #   imported module: genomic Moran's I (Python port of the C++)
+│   ├── morans_i.py                    #   imported module: genomic Moran's I (Python port of the C++)
+│   └── morans_i_c.c                   #   C backend for morans_i.py, compiled on import
 │
 ├── Random_displacement_analysis/       # SHARED: vertex perturbation (jiggle) sweep
 │   ├── jiggle_control.py              #   perturb vertices over a distance sweep, track knot stability
@@ -101,9 +104,13 @@ in the convex hull, or downsampled simulated "globule" curves), computes
 geometric topology metrics, and writes a multi-page PDF of per-walk report cards
 plus summary CSVs.
 
-**Input CSV columns:** `Walk-IDs`, `time-point` (0-19), `x`, `y`, `z` (nm),
-`precisionx`, `precisiony`, `precisionz` (nm). Only walks with all timepoints are
-kept.
+**Input CSV columns:** `Walk-IDs`, `time-point` (0-based integer), `x`, `y`,
+`z` (nm), `precisionx`, `precisiony`, `precisionz` (nm). The analysed timepoint
+range is set with `--tp_start_1based` / `--tp_end_1based` (1-based inclusive,
+so flag value = `time-point` + 1; the defaults 1 and 20 select `time-point`
+0-19). Only walks present at every timepoint in the range are kept, and the
+number of timepoints in the range is the polygon's vertex count everywhere
+(sampling, controls, Kendall, parabolas, Moran's I genome cycle).
 
 **Key arguments** (see `--help` for the full list of ~40):
 
@@ -120,13 +127,23 @@ kept.
 | `--kendall` | Kendall shape-space analysis |
 | `--vassiliev` / `--num_vassiliev_proj N` | Vassiliev V2 invariant |
 | `--xyCN` / `--xzCN` / `--yzCN` | per-plane crossing numbers |
+| `--tp_start_1based` / `--tp_end_1based` (default 1, 20) | analysed timepoint range, 1-based inclusive |
 | `--unknotted_globule` / `--knotted_globule` (+ `_dir`) | use simulated globule downsamples as controls |
-| `--segment_by` | how 10k-gon globules are downsampled to 20-gons |
+| `--segment_by` | how 10k-gon globules are downsampled to n-gons |
+| `--globule_cache_csv PATH` | cache the globule control distributions (they depend only on the globule dirs, vertex count, samples per globule and segmentation, not on the walks); loaded if present, written otherwise |
 | `--randomize_order` | connect sampled points in random (not genomic) order (a control) |
-| `--morans_i_file PATH` | overlay precomputed Moran's I results on report cards |
+| `--morans_max_points N` (default 50000) | Moran's I: stratified-subsample walks with more localizations than this; `0` = use every localization |
+| `--morans_seed N` | Moran's I: seed for the subsampling and permutations |
+| `--morans_cache_csv PATH` | Moran's I: load a precomputed per-walk CSV instead of computing (`--morans_i_file` is a deprecated alias) |
+| `--skip_morans` | skip Moran's I entirely |
+
+Moran's I is computed by default, per walk, on the localization cloud (see
+`Morans_I/` below); nothing needs to be built by hand.
 
 **Outputs:** `<prefix>_comprehensive_report.pdf` (per-walk report cards),
-`<prefix>_summary.csv` (aggregate knot distribution), and metric CSVs.
+`<prefix>_summary.csv` (aggregate knot distribution),
+`<prefix>_morans_i_results.csv` (per-walk Moran's I, reusable via
+`--morans_cache_csv`), and metric CSVs.
 
 **Knot classification** uses `KnotoID` (projection-based identifier). Names are
 bucketed by `classify_name()` into `0_1` (unknot), `3_1` (trefoil, merging the
@@ -171,21 +188,34 @@ python fit_sigmoid_jiggle.py --inputs smlm.h5 wf.h5 --labels SMLM Widefield --ou
 
 ### `Morans_I/` (genomic spatial autocorrelation, C++)
 
-A standalone C++ tool computing genomic Moran's I: are spatially close points
-also genomically close? It builds inverse-squared-distance spatial weights, maps
-each timepoint to an angle on the circular genome, and computes the circular
-Moran's I with a permutation-test p-value.
+Genomic Moran's I on the localization cloud: are spatially close points also
+genomically close? For every pair of localizations the spatial weight is
+`1 / (d^2 + eps)`, row-standardized; each timepoint is mapped to an angle on
+the circular genome (`tp * 2 pi / n_timepoints_in_range`); the circular
+deviations from the circular mean form the variable; the p-value is a
+one-tailed 100-permutation test (floor 1/101 = 0.0099). The calculator streams
+the weights row by row, so memory is O(n) and a 50k-point walk takes a few
+seconds; the observed I is deterministic when no subsampling occurs.
+
+`comprehensive_report_cards.py` uses this through `morans_i_cloud.py`, which
+compiles `Morans_I/morans_i_genomic.so` from the sources on first use (any
+`c++`/`g++`/`clang++`, or `$CXX`), loads it with ctypes and falls back to an
+equivalent NumPy implementation (about 2x slower) if no compiler is found.
+
+The standalone CLI is still available for use outside the pipeline:
 
 ```bash
 cd Super_resolution_analysis/Morans_I
-make                                  # builds ./morans_i_genomic
-./morans_i_genomic data.csv [max_sample_points]
+make clean && make                    # builds ./morans_i_genomic (CLI only)
+./morans_i_genomic data.csv [max_sample_points] [--tp_start_1based N] [--tp_end_1based N]
+# max_sample_points: per-walk stratified subsample cap (default 50000, 0 = all points)
 # -> data_morans_i_results.csv  (Filename, Walk-ID, Time-points, I-value, P-value)
 ```
 
-The resulting CSV can be fed back into `comprehensive_report_cards.py` via
-`--morans_i_file`. The Python port (`Widefield_analysis/morans_i.py`)
-implements the same algorithm for the widefield path.
+Its CSV has the same format the pipeline writes, so it can be passed to
+`comprehensive_report_cards.py --morans_cache_csv`. The Python port
+(`Widefield_analysis/morans_i.py`) implements the same statistic for the
+one-point-per-timepoint widefield curves.
 
 ### `utility/convert_widefield_to_smlm.py`
 
@@ -247,7 +277,11 @@ python report_cards_single_curve.py \
   reported), in both XYZ and constrained PC space.
 - **`morans_i.py`** is the Python port of the C++ Moran's I, adapted for the
   one-point-per-timepoint model. It exposes `compute_for_walks`,
-  `write_morans_results_csv`, and `load_morans_cache_csv`.
+  `write_morans_results_csv`, and `load_morans_cache_csv`. On import it
+  compiles `morans_i_c.c` to `morans_i_c.so` (plain `cc -O2 -shared -fPIC`)
+  when the shared object is missing or stale and uses it through ctypes; if
+  no compiler is available it prints a warning and runs the identical NumPy
+  implementation.
 
 The widefield and SMLM paths share the same metric vocabulary (ACN, writhe, Rg,
 planar crossing numbers, knot type + determinant, KL / Wasserstein); the
@@ -389,21 +423,28 @@ scientific Python stack plus two knot-analysis libraries.
 - `vassiliev_v2_projection` - custom module for the V2 invariant (external,
   imported by the SMLM main script).
 
-**C++ (Moran's I):** a C++17 compiler (`g++`) and `make`. Build with `make` in
-`Super_resolution_analysis/Morans_I/`.
+**C/C++ (Moran's I backends):** a C++17 compiler (`c++`, `g++` or `clang++`;
+on macOS `xcode-select --install`, in conda `conda install -c conda-forge
+cxx-compiler`). Both pipelines build their Moran's I backend automatically on
+first use (`Super_resolution_analysis/Morans_I/morans_i_genomic.so` and
+`Widefield_analysis/morans_i_c.so`) and fall back to NumPy with a warning if
+no compiler is found. `make` is only needed for the standalone C++ CLI.
 
 ## End-to-end examples
 
 **Super-resolution path**
 
 ```bash
-# (optional) compute Moran's I first
-cd Super_resolution_analysis/Morans_I && make && ./morans_i_genomic data.csv
-
-# main analysis
-cd .. && python comprehensive_report_cards.py 100 1000 \
+# main analysis (Moran's I is computed inside; the C++ backend is built on first use)
+cd Super_resolution_analysis && python comprehensive_report_cards.py 100 1000 \
   --input data.csv --output exp1 --parallel \
-  --acn --rog --kendall --morans_i_file Morans_I/data_morans_i_results.csv
+  --tp_start_1based 1 --tp_end_1based 20 --morans_max_points 0 \
+  --acn --rog --kendall
+
+# rerun reusing the Moran's I from the first run
+python comprehensive_report_cards.py 100 1000 \
+  --input data.csv --output exp2 --parallel \
+  --morans_cache_csv exp1_morans_i_results.csv --acn --rog --kendall
 
 # robustness sweep (shared across modalities)
 cd Random_displacement_analysis
@@ -446,7 +487,7 @@ python Classifier_analysis/salmonella_quadrant_plot.py quadrant_stats_samples.pa
 | Jiggle input TXT | whitespace `time-point Walk-ID x y z` | jiggle control |
 | Polygon TSV | tab-delimited `x y z`, one row per vertex | MD + Gaussian controls |
 | GROMACS `.gro` / `.ndb` | fixed-width MD structure files | MD utility scripts |
-| Moran's I CSV | `Filename`, `Walk-ID`, `Time-points`, `I-value`, `P-value` | overlay onto report cards |
+| Moran's I CSV | `Filename`, `Walk-ID`, `Time-points`, `I-value`, `P-value` | written by both report-card pipelines and the C++ CLI; reusable via `--morans_cache_csv` |
 
 ## Caveats
 
@@ -459,6 +500,17 @@ python Classifier_analysis/salmonella_quadrant_plot.py quadrant_stats_samples.pa
 - **External libraries not vendored.** `knoodle`, `KnotoID`, and
   `vassiliev_v2_projection` must be installed/available separately; classification
   and the V2 invariant are skipped or error out without them.
-- **Timepoint conventions differ.** The SMLM tools use 0-based `time-point` 0-19;
-  the widefield and plotting tools use 1-based inclusive ranges (default 3-22).
-  Mind the offset when comparing across paths.
+- **Timepoint conventions.** All tools now take 1-based inclusive
+  `--tp_start_1based` / `--tp_end_1based`; the SMLM `time-point` column is
+  0-based, so flag value = column value + 1. The SMLM default range (1-20)
+  selects `time-point` 0-19; the widefield default is 3-22. Mind the offset
+  when comparing across paths.
+- **`--morans_i_file` is deprecated** in the SMLM script. It is kept as an
+  alias for `--morans_cache_csv` with no default; earlier versions defaulted
+  to a dataset-specific file, which could silently attach the wrong Moran's I
+  values by Walk-ID collision.
+- **Moran's I subsampling.** Walks above `--morans_max_points` are
+  stratified-subsampled per timepoint, which makes their I depend on the
+  draw and slightly on floating-point rounding (the circular mean of a
+  nearly balanced timepoint distribution is ill-conditioned). Use
+  `--morans_max_points 0` for exact values on the full cloud.
