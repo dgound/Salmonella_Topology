@@ -2,7 +2,7 @@
 """Post-filter QC / follow-up analysis for drift-corrected, fully filtered walks.
 
 This module is a *follow-up QC / analysis stage* meant to run after
-`drift_correct.py` finishes its drift correction + full-coverage filter +
+RodRunner's `drift_correct.py` step finishes its drift correction + full-coverage filter +
 movement filter. At that point each WalkID is expected to contribute one
 drift-corrected point per timepoint. This is NOT a cloud / centroid
 analysis, it is a one-point-per-TP analysis.
@@ -11,7 +11,7 @@ The user supplies an inclusive, 1-based timepoint range
 (`tp_start_1based`, `tp_end_1based`). All matrices and parabolas are
 computed on exactly that range.
 
-Adapted from `~/dtm_cv_pipeline/walk_curator_lite.py`:
+Adapted from the lab's earlier walk-curation code (`walk_curator_lite.py`):
   - `_compute_diagonal_means_for_walk`  -> `_diagonal_means_from_matrix` here,
     taking a prebuilt (N, N) distance matrix for an already-ordered trace.
   - `_fit_parabola`                     -> kept verbatim in spirit, R2 only
@@ -939,7 +939,7 @@ def run_post_filter_analysis(filtered_csv, outdir,
     ----
     filtered_csv : str
         Path to the final downstream-ready walks CSV produced by
-        `drift_correct.py` (after full-coverage + movement filters).
+        RodRunner's `drift_correct.py` step (after full-coverage + movement filters).
     outdir : str
         Directory to write outputs into.
     tp_start_1based, tp_end_1based : int

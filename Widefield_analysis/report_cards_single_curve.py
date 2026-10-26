@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Comprehensive report-card analysis for single-curve walks.
 
-Adapted from `~/knot_analysis_Nir/Knot_analysis_pipeline/comprehensive_report_cards.py`
+Adapted from `Super_resolution_analysis/comprehensive_report_cards.py`
 for this project's data model.
 
 Key adaptation
@@ -39,7 +39,7 @@ point count when it differs from 20.
 Entry point
 -----------
 See `main()` / the `--help` output. Input is the final filtered CSV written by
-`drift_correct.py` (after `qc_post_filter` has already run on it).
+RodRunner's `drift_correct.py` step (after `qc_post_filter` has already run on it).
 """
 
 from __future__ import annotations
@@ -1871,7 +1871,7 @@ def write_results_csv(rows, control_dists, output_csv):
 # ===========================================================================
 # Constrained PC-space helpers.
 #
-# Ported from ~/dtm_cv_pipeline/walk_curator_lite.py::compute_constrained_axes
+# Ported from walk_curator_lite.py::compute_constrained_axes (earlier walk-curation code)
 # and the canonical-orientation logic in transform_to_pca. Important: PC2
 # here is NOT the second PCA eigenvector; it is the XY-plane rotation of
 # PC1's XY projection (`(x, y) -> (-y, x)`). PC3 is the right-handed cross
@@ -2128,7 +2128,7 @@ def _parse_args():
                     'comprehensive_report_cards.py for one curve per WalkID.')
     p.add_argument(
         '--input', required=True,
-        help='Final filtered walks CSV (produced by drift_correct.py).')
+        help='Final filtered walks CSV (RodRunner output, produced by its drift_correct.py step).')
     p.add_argument(
         '--outdir', default='.',
         help='Output directory (default: current directory).')

@@ -118,7 +118,7 @@ number of timepoints in the range is the polygon's vertex count everywhere
 |----------|---------|
 | `N` (positional) | number of sampled trajectories per Walk-ID |
 | `M` (positional, default 1000) | number of random 20-gon controls |
-| `--input PATH` | input SMLM CSV (default is a hardcoded local path, see Caveats) |
+| `--input PATH` (required) | input SMLM CSV |
 | `--output PREFIX` | output filename prefix |
 | `--parallel` / `--workers N` | multiprocessing across walks |
 | `--metrics {all,kl,wasserstein}` | distribution-distance metric(s) |
@@ -127,7 +127,7 @@ number of timepoints in the range is the polygon's vertex count everywhere
 | `--kendall` | Kendall shape-space analysis |
 | `--xyCN` / `--xzCN` / `--yzCN` | per-plane crossing numbers |
 | `--tp_start_1based` / `--tp_end_1based` (default 1, 20) | analysed timepoint range, 1-based inclusive |
-| `--unknotted_globule` / `--knotted_globule` (+ `_dir`) | use simulated globule downsamples as controls |
+| `--unknotted_globule` / `--knotted_globule` (each requires its `_dir`) | use simulated globule downsamples as controls |
 | `--segment_by` | how 10k-gon globules are downsampled to n-gons |
 | `--globule_cache_csv PATH` | cache the globule control distributions (they depend only on the globule dirs, vertex count, samples per globule and segmentation, not on the walks); loaded if present, written otherwise |
 | `--randomize_order` | connect sampled points in random (not genomic) order (a control) |
@@ -230,10 +230,13 @@ Walk-ID is a single ordered curve rather than a sampled distribution. This path
 is adapted from the SMLM pipeline with the per-sample distribution machinery
 removed.
 
-> **Upstream stage:** the input CSV is the output of a `drift_correct.py`
-> step (drift correction + full-coverage filter + movement filter). The input
-> schema is `WalkID`, `tp` (e.g. `TP007` or `TP007_CYC000`), `x_nm`, `y_nm`,
-> `z_nm`.
+> **Upstream stage:** the input CSV comes from the
+> [RodRunner](https://github.com/dgound/RodRunner) widefield pipeline
+> (cell segmentation, 3D localization, replication QC, drift correction and
+> movement filtering): per location
+> `localizations_640_drift_corrected_filtered.csv`, or for a whole dataset
+> `merged/all_locations_640_valid_walks*.csv`. The input schema is `WalkID`,
+> `tp` (e.g. `TP007` or `TP007_CYC000`), `x_nm`, `y_nm`, `z_nm`.
 
 ### `report_cards_single_curve.py`
 
@@ -409,9 +412,13 @@ scientific Python stack plus two knot-analysis libraries.
 `seaborn`, `tqdm`.
 
 **Knot analysis (required for classification):**
-- `knoodle` - crossing number, Alexander determinant. The Gaussian and MD
-  pipelines expect it inside a conda environment named `knoodle`.
-- `KnotoID` - projection-based knot identifier.
+- `knoodle` - crossing number, Alexander determinant: Knoodle by Henrik
+  Schumacher and Jason Cantarella, <https://github.com/HenrikSchumacher/Knoodle>
+  (build its Python bindings). The Gaussian and MD pipelines expect it inside
+  a conda environment named `knoodle`.
+- `KnotoID` - projection-based knot identifier: use the maintained fork
+  <https://github.com/dgound/Knoto-ID> (the original `sib-swiss/Knoto-ID` is
+  no longer maintained) and install its `python/` bindings.
 
 **Optional / situational:**
 - `numba` - JIT acceleration of ACN/writhe (falls back to pure Python).
@@ -453,7 +460,7 @@ python fit_sigmoid_jiggle.py --inputs smlm.h5 wf.h5 --labels SMLM Widefield --ou
 **Widefield path**
 
 ```bash
-# input must already be drift-corrected/filtered (drift_correct.py, upstream)
+# input: a RodRunner output CSV (drift-corrected, filtered walks)
 cd Widefield_analysis
 python report_cards_single_curve.py \
   --input filtered_walks.csv --outdir out --output_prefix wf1 \
@@ -488,12 +495,12 @@ python Classifier_analysis/salmonella_quadrant_plot.py quadrant_stats_samples.pa
 
 ## Caveats
 
-- **Hardcoded default paths.** Several `--input` (and globule directory) defaults
-  point to the original author's machine (for example
-  `/Users/dimos/knot_analysis_Nir/datasets/...`). Always pass explicit
-  `--input`/`--output` paths.
-- **Upstream stage.** The widefield path consumes the output of
-  `drift_correct.py`, an upstream drift-correction and filtering step.
+- **No default data paths.** Input files and globule directories are required
+  arguments (`--input`, `--unknotted_globule_dir`, `--knotted_globule_dir`,
+  the jiggle `input_file`); nothing defaults to a location outside the
+  repository.
+- **Upstream stage.** The widefield path consumes the output of the
+  [RodRunner](https://github.com/dgound/RodRunner) pipeline (see Main path 2).
 - **External libraries not vendored.** `knoodle` and `KnotoID` must be
   installed/available separately; classification is skipped or errors out
   without them.

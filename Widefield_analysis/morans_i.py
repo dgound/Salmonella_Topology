@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Genomic Moran's I for single-curve walks.
 
-Ported from `~/knot_analysis_Nir/Knot_analysis_pipeline/morans_i_genomic.cpp`
+Ported from the C++ calculator in `Super_resolution_analysis/Morans_I/morans_i_genomic.cpp`
 and adapted for this project, where each WalkID has exactly one ordered 3D
 point per TP after drift correction and filtering. No DeWitt resampling, no
 weighted centroid: the spatial coordinates are the walk's own ordered
