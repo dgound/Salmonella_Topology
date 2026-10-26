@@ -3,12 +3,12 @@ Per-walk "cloud" Moran's I between 3D localization positions and circular
 genomic position (time-point), with a 100-permutation p-value.
 
 Two tiers with identical numerics:
-  - C++: the validated GenomicMoransICalculator (morans_i_cpp/), compiled on
+  - C++: the validated GenomicMoransICalculator (Morans_I/), compiled on
     first use into morans_i_genomic.so and called through ctypes.
   - NumPy: a blockwise reimplementation used when no compiler is available.
 
 Walks above `max_points` localizations are stratified-subsampled per
-time-point exactly as `stratified_sample` in morans_i_cpp/main_genomic.cpp.
+time-point exactly as `stratified_sample` in Morans_I/main_genomic.cpp.
 """
 
 import os
@@ -32,8 +32,7 @@ def find_cpp_dir(override=None):
     if override:
         candidates = [override]
     else:
-        candidates = [os.path.join(_HERE, 'Morans_I'),
-                      os.path.join(_HERE, '..', 'morans_i_cpp')]
+        candidates = [os.path.join(_HERE, 'Morans_I')]
     for d in candidates:
         if all(os.path.isfile(os.path.join(d, f)) for f in _SOURCES):
             return os.path.abspath(d)

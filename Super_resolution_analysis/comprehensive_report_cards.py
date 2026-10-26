@@ -3858,10 +3858,10 @@ def create_comprehensive_pdf_report(all_figures, output_prefix):
 
 # ============================================================================
 # Population-level parabola & distance-matrix pages for De Witt curves
-# (uses helpers from Salmonella_WF/qc_post_filter.py and the constrained PCA
-# transform from Salmonella_WF/report_cards_single_curve.py)
+# (uses helpers from Widefield_analysis/qc_post_filter.py; the constrained PCA
+# transform from report_cards_single_curve.py is vendored below)
 # ============================================================================
-SALMONELLA_WF_DIR = '/Users/dimos/Documents/GitHub/Salmonella_WF'
+WIDEFIELD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Widefield_analysis')
 
 
 def _import_qc_helpers():
@@ -3872,8 +3872,8 @@ def _import_qc_helpers():
     that breaks when imported from another package).
     """
     try:
-        if SALMONELLA_WF_DIR not in sys.path:
-            sys.path.insert(0, SALMONELLA_WF_DIR)
+        if WIDEFIELD_DIR not in sys.path:
+            sys.path.insert(0, WIDEFIELD_DIR)
         from qc_post_filter import (
             build_mean_distance_matrices_figure,
             build_mean_parabola_xyz_figure,
@@ -3886,7 +3886,7 @@ def _import_qc_helpers():
             'to_pc': walks_to_constrained_pc,
         }
     except Exception as e:
-        print(f"  Warning: qc_post_filter helpers not importable from {SALMONELLA_WF_DIR}: {e}")
+        print(f"  Warning: qc_post_filter helpers not importable from {WIDEFIELD_DIR}: {e}")
         return None
 
 
@@ -4075,9 +4075,8 @@ def main():
     parser.add_argument('N', type=int, help='Number of iterations for sampling from Walk-IDs')
     parser.add_argument('M', type=int, nargs='?', default=1000,
                        help='Number of random 20-gons to generate (default: 1000)')
-    parser.add_argument('--input', type=str,
-                       default='/Users/dimos/knot_analysis_Nir/datasets/New_data_08_18_2025_24walks.csv',
-                       help='Input CSV file path')
+    parser.add_argument('--input', type=str, required=True,
+                       help='Input SMLM CSV file path')
     parser.add_argument('--output', type=str, default='knot_distribution_comparison',
                        help='Output file prefix for results')
     parser.add_argument('--parallel', action='store_true',
@@ -4090,12 +4089,10 @@ def main():
                        help='Use unknotted globule control')
     parser.add_argument('--knotted_globule', action='store_true',
                        help='Use knotted globule control')
-    parser.add_argument('--unknotted_globule_dir', type=str,
-                       default='/Users/dimos/Salmonella_sims_model1/rotated_tsv/unknotted',
-                       help='Directory containing unknotted globule TSV files')
-    parser.add_argument('--knotted_globule_dir', type=str,
-                       default='/Users/dimos/Salmonella_sims_model1/rotated_tsv/knotted_run3',
-                       help='Directory containing knotted globule TSV files')
+    parser.add_argument('--unknotted_globule_dir', type=str, default=None,
+                       help='Directory containing unknotted globule TSV files (required with --unknotted_globule)')
+    parser.add_argument('--knotted_globule_dir', type=str, default=None,
+                       help='Directory containing knotted globule TSV files (required with --knotted_globule)')
     parser.add_argument('--samples_per_globule', type=int, default=5,
                        help='Number of 20-gons to sample from each 10k-gon file (default: 5)')
     parser.add_argument('--segment_by',
@@ -4182,7 +4179,7 @@ def main():
                        help="Seed for Moran's I subsampling and permutations (default: random)")
     parser.add_argument('--morans_cpp_dir', type=str, default=None,
                        help="Directory with the Moran's I C++ sources "
-                            "(default: ./Morans_I or ../morans_i_cpp)")
+                            "(default: Morans_I next to this script)")
 
     args = parser.parse_args()
 
@@ -4190,6 +4187,10 @@ def main():
         parser.error("--tp_start_1based must be >= 1")
     if args.tp_end_1based < args.tp_start_1based:
         parser.error("--tp_end_1based must be >= --tp_start_1based")
+    if args.unknotted_globule and not args.unknotted_globule_dir:
+        parser.error("--unknotted_globule requires --unknotted_globule_dir")
+    if args.knotted_globule and not args.knotted_globule_dir:
+        parser.error("--knotted_globule requires --knotted_globule_dir")
 
     tp_start_0 = args.tp_start_1based - 1
     tp_end_0 = args.tp_end_1based - 1
@@ -4329,13 +4330,15 @@ def main():
     # on the walk set). Random control above stays per-dataset.
     globule_cache, cache_meta = load_globule_cache_csv(args.globule_cache_csv)
     if globule_cache is not None:
+        def _base(p):
+            return os.path.basename(os.path.normpath(p)) if p else ''
         want = (n_vertices, int(samples_per_globule), args.segment_by,
-                os.path.basename(os.path.normpath(args.unknotted_globule_dir or '')),
-                os.path.basename(os.path.normpath(args.knotted_globule_dir or '')))
+                _base(args.unknotted_globule_dir) if args.unknotted_globule else '',
+                _base(args.knotted_globule_dir) if args.knotted_globule else '')
         got = (cache_meta['n_vertices'], cache_meta['samples_per_globule'],
                cache_meta['segment_by'],
-               os.path.basename(os.path.normpath(cache_meta['unknotted_dir'])),
-               os.path.basename(os.path.normpath(cache_meta['knotted_dir'])))
+               _base(cache_meta['unknotted_dir']) if args.unknotted_globule else '',
+               _base(cache_meta['knotted_dir']) if args.knotted_globule else '')
         if want != got:
             raise ValueError(
                 f'globule cache {args.globule_cache_csv} settings {got} do not '

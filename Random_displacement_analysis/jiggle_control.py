@@ -1300,19 +1300,16 @@ def main(input_file=None, max_workers=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python jiggle_control.py
-  python jiggle_control.py ../datasets/my_data.txt
-  python jiggle_control.py ../datasets/my_data.txt --workers 8
-  python jiggle_control.py --min-tp 0 --max-tp 19
-  python jiggle_control.py -s           # skip convex hull for faster debugging
-  python jiggle_control.py -j 100 -s    # quick test with 100 jiggles, no convex hull
+  python jiggle_control.py my_data.txt
+  python jiggle_control.py my_data.txt --workers 8
+  python jiggle_control.py my_data.txt --min-tp 0 --max-tp 19
+  python jiggle_control.py my_data.txt -s           # skip convex hull for faster debugging
+  python jiggle_control.py my_data.txt -j 100 -s    # quick test with 100 jiggles, no convex hull
         """
     )
     parser.add_argument(
         'input_file',
-        nargs='?',
-        default='../datasets/BiggieExp3_97walks_FIXED_10-20-25.txt',
-        help='Path to SMLM trajectory data file (default: BiggieExp3_97walks_FIXED_10-20-25.txt)'
+        help='Path to SMLM trajectory data file'
     )
     parser.add_argument(
         '--workers',
